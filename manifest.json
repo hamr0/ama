@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "WeAreAsking",
+  "version": "0.1.0",
+  "description": "Talk to any website. Not just the page — the whole site.",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [{
+    "matches": ["<all_urls>"],
+    "js": ["content.js"]
+  }],
+  "action": {
+    "default_title": "WeAreAsking"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "web_accessible_resources": [{
+    "resources": ["widget.css"],
+    "matches": ["<all_urls>"]
+  }]
+}
