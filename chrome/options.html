@@ -85,8 +85,8 @@
 
     <label for="provider">Provider</label>
     <select id="provider">
-      <option value="anthropic">Anthropic (Claude)</option>
       <option value="openai">OpenAI (GPT)</option>
+      <option value="anthropic">Anthropic (Claude)</option>
     </select>
 
     <label for="apiKey">API Key</label>
@@ -94,8 +94,8 @@
     <p class="hint">Your key is stored locally and never sent anywhere except your chosen provider.</p>
 
     <label for="model">Model</label>
-    <input type="text" id="model" placeholder="claude-sonnet-4-20250514">
-    <p class="hint" id="modelHint">Leave blank for default. Anthropic: claude-sonnet-4-20250514, OpenAI: gpt-4o-mini</p>
+    <input type="text" id="model" placeholder="gpt-4o-mini">
+    <p class="hint" id="modelHint">Leave blank for default. OpenAI: gpt-4o-mini, Anthropic: claude-sonnet-4-20250514</p>
 
     <label for="maxPages">Max pages to crawl</label>
     <input type="number" id="maxPages" min="1" max="10" value="3">

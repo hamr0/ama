@@ -41,7 +41,12 @@
   panel.innerHTML = `
     <div class="waa-header">
       <span>WeAreAsking</span>
-      <button class="waa-close" title="Close">&times;</button>
+      <div class="waa-header-actions">
+        <button class="waa-settings" title="Settings">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.49.49 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.48.48 0 00-.48-.41h-3.84a.48.48 0 00-.48.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 00-.59.22L2.74 8.87a.48.48 0 00.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.26.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1112 8.4a3.6 3.6 0 010 7.2z"/></svg>
+        </button>
+        <button class="waa-close" title="Close">&times;</button>
+      </div>
     </div>
     <div class="waa-messages">
       <div class="waa-empty">Ask this site anything.<br>The agent will explore pages to find your answer.</div>
@@ -53,6 +58,7 @@
   `;
   shadow.appendChild(panel);
 
+  const settingsBtn = panel.querySelector('.waa-settings');
   const closeBtn = panel.querySelector('.waa-close');
   const messages = panel.querySelector('.waa-messages');
   const emptyState = panel.querySelector('.waa-empty');
@@ -66,6 +72,10 @@
     bubble.classList.add('hidden');
     panel.classList.remove('hidden');
     input.focus();
+  });
+
+  settingsBtn.addEventListener('click', () => {
+    api.runtime.sendMessage({ type: 'openSettings' });
   });
 
   closeBtn.addEventListener('click', () => {
@@ -112,10 +122,15 @@
 
   api.runtime.onMessage.addListener((msg) => {
     if (msg.type === 'progress') {
-      showProgress(msg.page, msg.current, msg.total);
+      showProgress(msg.phase, msg.detail, msg.round);
     } else if (msg.type === 'answer') {
       clearProgress();
       appendAnswer(msg.text, msg.sources, msg.trail);
+      isBusy = false;
+      sendBtn.disabled = false;
+    } else if (msg.type === 'nokey') {
+      clearProgress();
+      appendNoKey();
       isBusy = false;
       sendBtn.disabled = false;
     } else if (msg.type === 'error') {
@@ -130,16 +145,24 @@
 
   let progressEl = null;
 
-  function showProgress(page, current, total) {
+  const PHASE_LABELS = {
+    decompose: 'Breaking down question',
+    scan: 'Scanning page',
+    navigate: 'Picking pages',
+    extract: 'Reading pages',
+    answer: 'Thinking'
+  };
+
+  function showProgress(phase, detail, round) {
     if (!progressEl) {
       progressEl = el('div', { className: 'waa-progress' });
       messages.appendChild(progressEl);
     }
-    const label = total > 0 ? `${current} of ${total} pages` : '';
+    const label = PHASE_LABELS[phase] || phase || 'Working';
+    const roundLabel = round ? ` (round ${round})` : '';
     progressEl.innerHTML = `
-      <span class="waa-spinner"></span> Exploring...<br>
-      <span class="waa-progress-page">&rarr; ${escHtml(page)}</span><br>
-      <span>${label}</span>
+      <span class="waa-spinner"></span> ${escHtml(label)}${roundLabel}<br>
+      <span class="waa-progress-page">${escHtml(detail || '')}</span>
     `;
     messages.scrollTop = messages.scrollHeight;
   }
@@ -167,11 +190,15 @@
     if (sources && sources.length) {
       html += `<div class="waa-sources">
         <div class="waa-sources-title">Sources:</div>
-        ${sources.map(s =>
-          `<a class="waa-source-link" href="${escAttr(s.url)}" target="_blank" rel="noopener">
-            ${escHtml(shortenUrl(s.url))}
-          </a>`
-        ).join('')}
+        ${sources.map(s => {
+          const label = escHtml(s.title || shortenUrl(s.url));
+          const excerpt = s.relevant_excerpt
+            ? `<span class="waa-source-excerpt">${escHtml(s.relevant_excerpt)}</span>`
+            : '';
+          return `<a class="waa-source-link" href="${escAttr(s.url)}" target="_blank" rel="noopener">
+            ${label}
+          </a>${excerpt}`;
+        }).join('')}
       </div>`;
     }
 
@@ -204,6 +231,17 @@
     messages.scrollTop = messages.scrollHeight;
   }
 
+  function appendNoKey() {
+    const div = el('div', { className: 'waa-error' });
+    div.innerHTML = 'No API key configured. <a class="waa-error-link" href="#">Open settings</a> to add one.';
+    div.querySelector('.waa-error-link').addEventListener('click', (e) => {
+      e.preventDefault();
+      api.runtime.sendMessage({ type: 'openSettings' });
+    });
+    messages.appendChild(div);
+    messages.scrollTop = messages.scrollHeight;
+  }
+
   function appendError(text) {
     const div = el('div', { className: 'waa-error' });
     div.textContent = text;
@@ -224,12 +262,27 @@
   function extractCurrentPage() {
     const text = extractPageText();
     const links = extractPageLinks();
+    const headings = extractPageHeadings();
     return {
       url: location.href,
       title: document.title,
       text: text.slice(0, 5000),
-      links
+      links,
+      headings
     };
+  }
+
+  function extractPageHeadings() {
+    const headings = [];
+    for (const el of document.querySelectorAll('h1, h2, h3, h4, h5, h6')) {
+      const text = (el.textContent || '').trim();
+      if (!text || text.length > 200) continue;
+      const style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') continue;
+      const level = parseInt(el.tagName[1], 10);
+      headings.push({ level, text });
+    }
+    return headings;
   }
 
   function extractPageText() {
@@ -283,7 +336,15 @@
         if (!text || text.length > 200) continue;
         if (/\.(pdf|jpg|png|gif|svg|zip|mp4|css|js)$/i.test(href)) continue;
 
-        links.push({ url: href, text });
+        // Tag whether this link is in a nav, header, or footer (site navigation)
+        const navEl = a.closest('nav, [role="navigation"]');
+        const footerEl = a.closest('footer, [role="contentinfo"]');
+        const headerEl = a.closest('header');
+        const inNav = !!(navEl || footerEl || headerEl);
+        // Get the section label from aria-label if available
+        const sectionEl = navEl || footerEl || headerEl;
+        const navLabel = sectionEl ? (sectionEl.getAttribute('aria-label') || sectionEl.tagName.toLowerCase()) : '';
+        links.push({ url: href, text, nav: inNav, navLabel });
       } catch { /* skip bad urls */ }
     }
     return links;
