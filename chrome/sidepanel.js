@@ -405,6 +405,15 @@
     isBusy = true;
     sendBtn.disabled = true;
 
+    // Track compare query submission (privacy-safe: mode, provider, tab count only)
+    if (window.AMAAnalytics) {
+      window.AMAAnalytics.logQuerySubmitted({
+        mode: 'compare',
+        provider: providerSelect.value,
+        queryLength: allTabsInfo.length // For compare mode, "query length" is tab count
+      });
+    }
+
     const tabNames = allTabsInfo.map(t => t?.title || 'Untitled').join(' vs ');
     storeAndAppendMsg('user', 'Compare: ' + tabNames);
     showProgress('Comparing...', `Reading ${allTabsInfo.length} pages`);
@@ -465,6 +474,15 @@
     sendBtn.disabled = true;
     input.value = '';
     lastQuestion = question;
+
+    // Track query submission (privacy-safe: mode, provider, length only)
+    if (window.AMAAnalytics) {
+      window.AMAAnalytics.logQuerySubmitted({
+        mode: mode,
+        provider: providerSelect.value,
+        queryLength: question.length
+      });
+    }
 
     storeAndAppendMsg('user', question);
     showProgress('Working...', '');
