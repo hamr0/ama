@@ -139,19 +139,17 @@
 
   function renderConversation(origin) {
     // Clear messages
-    messages.innerHTML = '';
+    while (messages.firstChild) messages.firstChild.remove();
     const site = getSite(origin);
 
     if (site.messages.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'waa-empty';
-      empty.innerHTML = 'Ask anything about this site.<br>I\'ll read multiple pages and answer in your language.';
+      empty.textContent = 'Ask anything about this site. I\'ll read multiple pages and answer in your language.';
       messages.appendChild(empty);
     } else {
       for (const msg of site.messages) {
-        const div = document.createElement('div');
-        div.innerHTML = msg.html;
-        messages.appendChild(div.firstElementChild);
+        messages.appendChild(msg.node.cloneNode(true));
       }
       // Re-attach retry handlers
       messages.querySelectorAll('.waa-retry').forEach(btn => {
@@ -169,15 +167,16 @@
   // Store a message element's HTML so we can rebuild on tab switch
   function storeMsg(origin, el) {
     const site = getSite(origin);
-    const wrapper = document.createElement('div');
-    wrapper.appendChild(el.cloneNode(true));
-    site.messages.push({ html: wrapper.innerHTML });
+    site.messages.push({ node: el.cloneNode(true) });
   }
 
   function storeAndAppendMsg(role, text) {
     const div = document.createElement('div');
     div.className = `waa-msg waa-msg-${role}`;
-    div.innerHTML = `<div class="waa-msg-content">${escHtml(text)}</div>`;
+    const content = document.createElement('div');
+    content.className = 'waa-msg-content';
+    content.textContent = text;
+    div.appendChild(content);
     messages.appendChild(div);
     messages.scrollTop = messages.scrollHeight;
     if (currentOrigin) storeMsg(currentOrigin, div);
@@ -286,7 +285,14 @@
 
     const header = document.createElement('div');
     header.className = 'waa-tab-picker-header';
-    header.innerHTML = `<span class="waa-tab-picker-title">Compare <strong>${escHtml(currentTitle)}</strong> against:</span>`;
+    const titleSpan = document.createElement('span');
+    titleSpan.className = 'waa-tab-picker-title';
+    titleSpan.textContent = 'Compare ';
+    const strong = document.createElement('strong');
+    strong.textContent = currentTitle;
+    titleSpan.appendChild(strong);
+    titleSpan.appendChild(document.createTextNode(' against:'));
+    header.appendChild(titleSpan);
     const cancelBtn = document.createElement('button');
     cancelBtn.className = 'waa-tab-picker-cancel';
     cancelBtn.textContent = 'Cancel';
@@ -531,10 +537,16 @@
       progressEl.className = 'waa-progress';
       messages.appendChild(progressEl);
     }
-    progressEl.innerHTML = `
-      <span class="waa-spinner"></span> ${escHtml(phase || 'Working...')}<br>
-      <span class="waa-progress-page">${escHtml(detail || '')}</span>
-    `;
+    progressEl.textContent = '';
+    const spinner = document.createElement('span');
+    spinner.className = 'waa-spinner';
+    progressEl.appendChild(spinner);
+    progressEl.appendChild(document.createTextNode(' ' + (phase || 'Working...')));
+    progressEl.appendChild(document.createElement('br'));
+    const detailSpan = document.createElement('span');
+    detailSpan.className = 'waa-progress-page';
+    detailSpan.textContent = detail || '';
+    progressEl.appendChild(detailSpan);
     messages.scrollTop = messages.scrollHeight;
   }
 
@@ -549,28 +561,62 @@
     const div = document.createElement('div');
     div.className = 'waa-msg waa-msg-assistant';
 
-    let html = `<div class="waa-msg-content">${formatAnswer(text)}`;
-
-    if (sources && sources.length) {
-      html += `<div class="waa-sources">
-        <div class="waa-sources-title">Sources:</div>
-        ${sources.map(s => {
-          const label = escHtml(s.title || shortenUrl(s.url));
-          const excerpt = s.relevant_excerpt
-            ? `<span class="waa-source-excerpt">${escHtml(s.relevant_excerpt)}</span>`
-            : '';
-          return `<a class="waa-source-link" href="${escAttr(s.url)}" target="_blank" rel="noopener">
-            ${label}
-          </a>${excerpt}`;
-        }).join('')}
-      </div>`;
+    const msgContent = document.createElement('div');
+    msgContent.className = 'waa-msg-content';
+    // Format answer: convert markdown-like syntax safely
+    const lines = text.split('\n');
+    for (const line of lines) {
+      if (msgContent.childNodes.length > 0) msgContent.appendChild(document.createElement('br'));
+      // Bold: **text**
+      const parts = line.split(/(\*\*.*?\*\*|`.+?`)/g);
+      for (const part of parts) {
+        if (part.startsWith('**') && part.endsWith('**')) {
+          const strong = document.createElement('strong');
+          strong.textContent = part.slice(2, -2);
+          msgContent.appendChild(strong);
+        } else if (part.startsWith('`') && part.endsWith('`')) {
+          const code = document.createElement('code');
+          code.textContent = part.slice(1, -1);
+          msgContent.appendChild(code);
+        } else {
+          msgContent.appendChild(document.createTextNode(part));
+        }
+      }
     }
 
-    html += `</div>`;
-    html += `<button class="waa-retry">Not right? Try again</button>`;
-    div.innerHTML = html;
+    if (sources && sources.length) {
+      const sourcesDiv = document.createElement('div');
+      sourcesDiv.className = 'waa-sources';
+      const sourcesTitle = document.createElement('div');
+      sourcesTitle.className = 'waa-sources-title';
+      sourcesTitle.textContent = 'Sources:';
+      sourcesDiv.appendChild(sourcesTitle);
+      for (const s of sources) {
+        const a = document.createElement('a');
+        a.className = 'waa-source-link';
+        a.href = s.url;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.textContent = s.title || shortenUrl(s.url);
+        sourcesDiv.appendChild(a);
+        if (s.relevant_excerpt) {
+          const excerpt = document.createElement('span');
+          excerpt.className = 'waa-source-excerpt';
+          excerpt.textContent = s.relevant_excerpt;
+          sourcesDiv.appendChild(excerpt);
+        }
+      }
+      msgContent.appendChild(sourcesDiv);
+    }
 
-    div.querySelector('.waa-retry').addEventListener('click', () => {
+    div.appendChild(msgContent);
+
+    const retryBtn = document.createElement('button');
+    retryBtn.className = 'waa-retry';
+    retryBtn.textContent = 'Not right? Try again';
+    div.appendChild(retryBtn);
+
+    retryBtn.addEventListener('click', () => {
       if (lastQuestion && !isBusy) {
         storeAndAppendMsg('user', '(trying again...)');
         submitWithMode(null, lastQuestion);
