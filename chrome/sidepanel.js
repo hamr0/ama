@@ -1,6 +1,6 @@
-/* WeAreAsking — Side Panel UI
- * Communicates with background.js via chrome.runtime messages
- * Requests page data from content.js via background.js relay
+/* weareasking — Side Panel UI
+ * Default mode: Research (fetches pages, synthesizes answer)
+ * Per-site conversations: auto-follows active tab
  */
 
 (function () {
@@ -11,6 +11,7 @@
   /* ── DOM refs ── */
   const settingsBtn = document.querySelector('.waa-settings');
   const providerSelect = document.getElementById('provider-select');
+  const siteName = document.getElementById('site-name');
   const messages = document.getElementById('messages');
   const emptyState = document.getElementById('empty-state');
   const input = document.getElementById('input');
@@ -20,9 +21,27 @@
 
   /* ── State ── */
   let isBusy = false;
-  let askSiteMode = false;
+  let activeMode = null;
   let lastQuestion = '';
-  let conversationHistory = [];
+  let currentOrigin = '';
+
+  // Per-site conversation storage: origin → { messages: [{role, html}], history: [] }
+  const siteData = new Map();
+
+  function getSite(origin) {
+    if (!siteData.has(origin)) {
+      siteData.set(origin, { messages: [], history: [] });
+    }
+    return siteData.get(origin);
+  }
+
+  const MODE_CONFIG = {
+    search:    { placeholder: 'What are you looking for?', auto: false },
+    summarize: { placeholder: null, auto: true, prompt: 'Summarize this page concisely' },
+    contact:   { placeholder: null, auto: true, prompt: 'Find contact information, customer service, FAQ, or help pages on this site' },
+    asksite:   { placeholder: 'Search this site for...', auto: false },
+    compare:   { placeholder: 'Compare with...', auto: false },
+  };
 
   /* ── Load saved provider ── */
   api.storage.local.get('provider').then(data => {
@@ -39,52 +58,192 @@
   });
 
   /* ── Send handlers ── */
-  sendBtn.addEventListener('click', () => submit());
+  sendBtn.addEventListener('click', () => doSubmit());
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      submit();
+      doSubmit();
     }
   });
 
   /* ── Pill handlers ── */
+
+  function setMode(mode) {
+    if (activeMode === mode) {
+      activeMode = null;
+      input.placeholder = 'Ask anything about this site...';
+      pillContainer.querySelectorAll('.waa-pill').forEach(p => p.classList.remove('active'));
+      input.focus();
+      return;
+    }
+
+    activeMode = mode;
+    pillContainer.querySelectorAll('.waa-pill').forEach(p => {
+      p.classList.toggle('active', p.dataset.action === mode);
+    });
+
+    const config = MODE_CONFIG[mode];
+    if (config.auto) {
+      activeMode = null;
+      pillContainer.querySelectorAll('.waa-pill').forEach(p => p.classList.remove('active'));
+      submitWithMode(mode, config.prompt);
+    } else {
+      input.placeholder = config.placeholder;
+      input.focus();
+    }
+  }
+
   pillContainer.addEventListener('click', (e) => {
     const pill = e.target.closest('.waa-pill');
     if (!pill || pill.classList.contains('disabled') || isBusy) return;
-
-    const action = pill.dataset.action;
-    if (action === 'summarize') {
-      submitPill('Summarize this page concisely');
-    } else if (action === 'contact') {
-      submitPill('Find contact information, customer service, FAQ, or help pages on this site');
-    } else if (action === 'asksite') {
-      askSiteMode = true;
-      input.placeholder = 'Type your search and press Enter...';
-      input.focus();
-      pill.classList.add('active');
-    }
+    setMode(pill.dataset.action);
   });
 
-  /* ── Get active tab and request page data from content script ── */
+  /* ── Tab tracking + per-site conversations ── */
 
   async function getActiveTab() {
     const tabs = await api.tabs.query({ active: true, currentWindow: true });
     return tabs[0] || null;
   }
 
+  function getOrigin(url) {
+    try { return new URL(url).origin; } catch { return ''; }
+  }
+
+  function getHostname(url) {
+    try { return new URL(url).hostname; } catch { return url; }
+  }
+
+  async function switchToActiveTab() {
+    const tab = await getActiveTab();
+    if (!tab || !tab.url) return;
+
+    const origin = getOrigin(tab.url);
+    if (!origin || origin === currentOrigin) return;
+
+    // Save scroll position? Not needed — we rebuild from stored messages
+    currentOrigin = origin;
+    siteName.textContent = getHostname(tab.url);
+
+    // Rebuild messages area from stored conversation
+    renderConversation(origin);
+
+    // Check site search capability
+    refreshPageInfo(tab);
+  }
+
+  function renderConversation(origin) {
+    // Clear messages
+    messages.innerHTML = '';
+    const site = getSite(origin);
+
+    if (site.messages.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'waa-empty';
+      empty.innerHTML = 'Ask anything about this site.<br>I\'ll read multiple pages and answer in your language.';
+      messages.appendChild(empty);
+    } else {
+      for (const msg of site.messages) {
+        const div = document.createElement('div');
+        div.innerHTML = msg.html;
+        messages.appendChild(div.firstElementChild);
+      }
+      // Re-attach retry handlers
+      messages.querySelectorAll('.waa-retry').forEach(btn => {
+        btn.addEventListener('click', () => {
+          if (lastQuestion && !isBusy) {
+            storeAndAppendMsg('user', '(trying again...)');
+            submitWithMode(null, lastQuestion);
+          }
+        });
+      });
+      messages.scrollTop = messages.scrollHeight;
+    }
+  }
+
+  // Store a message element's HTML so we can rebuild on tab switch
+  function storeMsg(origin, el) {
+    const site = getSite(origin);
+    const wrapper = document.createElement('div');
+    wrapper.appendChild(el.cloneNode(true));
+    site.messages.push({ html: wrapper.innerHTML });
+  }
+
+  function storeAndAppendMsg(role, text) {
+    const div = document.createElement('div');
+    div.className = `waa-msg waa-msg-${role}`;
+    div.innerHTML = `<div class="waa-msg-content">${escHtml(text)}</div>`;
+    messages.appendChild(div);
+    messages.scrollTop = messages.scrollHeight;
+    if (currentOrigin) storeMsg(currentOrigin, div);
+    // Remove empty state if present
+    const empty = messages.querySelector('.waa-empty');
+    if (empty) empty.remove();
+  }
+
+  switchToActiveTab();
+  api.tabs.onActivated.addListener(() => switchToActiveTab());
+  api.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (changeInfo.status === 'complete') switchToActiveTab();
+  });
+
+  /* ── Page info (site search detection) ── */
+
+  function refreshPageInfo(tab) {
+    if (!tab) return;
+    try {
+      api.tabs.sendMessage(tab.id, { type: 'getPageInfo' }, (response) => {
+        if (api.runtime.lastError) return;
+        if (response && response.hasSearch) {
+          askSitePill.classList.remove('disabled');
+          askSitePill.title = 'Search this site';
+          askSitePill.style.pointerEvents = '';
+        } else {
+          askSitePill.classList.add('disabled');
+          askSitePill.title = 'No site search detected';
+          askSitePill.style.pointerEvents = 'none';
+        }
+      });
+    } catch { /* ignore */ }
+  }
+
+  /* ── Get page data from content script (auto-inject if needed) ── */
+
+  async function ensureContentScript(tabId) {
+    try {
+      await api.scripting.executeScript({
+        target: { tabId },
+        files: ['content.js']
+      });
+    } catch { /* may fail on chrome:// pages etc */ }
+    // Small delay for script to initialize
+    await new Promise(r => setTimeout(r, 200));
+  }
+
   async function getPageData() {
     const tab = await getActiveTab();
     if (!tab) throw new Error('No active tab found.');
 
+    // Try to talk to content script; inject if it's not there
     return new Promise((resolve, reject) => {
-      api.tabs.sendMessage(tab.id, { type: 'getPageData' }, (response) => {
+      api.tabs.sendMessage(tab.id, { type: 'getPageData' }, async (response) => {
         if (api.runtime.lastError) {
-          reject(new Error('Cannot communicate with page. Try refreshing the tab.'));
+          // Content script not loaded — inject it
+          await ensureContentScript(tab.id);
+          api.tabs.sendMessage(tab.id, { type: 'getPageData' }, (response2) => {
+            if (api.runtime.lastError || !response2?.pageData) {
+              reject(new Error('Cannot read this page. Try refreshing the tab.'));
+              return;
+            }
+            const site = getSite(currentOrigin);
+            response2.pageData.history = site.history.slice(-5);
+            resolve(response2.pageData);
+          });
           return;
         }
         if (response && response.pageData) {
-          // Attach conversation history from side panel
-          response.pageData.history = conversationHistory.slice(-5);
+          const site = getSite(currentOrigin);
+          response.pageData.history = site.history.slice(-5);
           resolve(response.pageData);
         } else {
           reject(new Error('No page data returned. Make sure you are on a web page.'));
@@ -95,65 +254,48 @@
 
   /* ── Submit logic ── */
 
-  function submitPill(question) {
-    hideEmptyState();
-    appendMsg('user', question);
-    submit(question, true);
+  async function doSubmit() {
+    const text = input.value.trim();
+    if (!text && !activeMode) return;
+    if (isBusy) return;
+
+    const mode = activeMode || null;
+    activeMode = null;
+    pillContainer.querySelectorAll('.waa-pill').forEach(p => p.classList.remove('active'));
+    input.placeholder = 'Ask anything about this site...';
+
+    submitWithMode(mode, text);
   }
 
-  async function submit(overrideQuestion, skipUserMsg) {
-    const question = overrideQuestion || input.value.trim();
+  async function submitWithMode(mode, question) {
     if (!question || isBusy) return;
-
-    // Ask Site mode
-    if (askSiteMode && !overrideQuestion) {
-      askSiteMode = false;
-      input.placeholder = 'Ask this site...';
-      if (askSitePill) askSitePill.classList.remove('active');
-      performSiteSearch(question);
-      input.value = '';
-      return;
-    }
 
     isBusy = true;
     sendBtn.disabled = true;
     input.value = '';
     lastQuestion = question;
 
-    hideEmptyState();
-    if (!skipUserMsg) appendMsg('user', question);
-    showProgress('Analyzing page...', '');
+    storeAndAppendMsg('user', question);
+    showProgress('Working...', '');
 
     try {
       const pageData = await getPageData();
-      api.runtime.sendMessage({
-        type: 'ask',
-        question,
-        pageData
-      });
-    } catch (err) {
-      clearProgress();
-      appendError(err.message);
-      isBusy = false;
-      sendBtn.disabled = false;
-    }
-  }
 
-  async function performSiteSearch(query) {
-    hideEmptyState();
-    appendMsg('user', 'Site search: ' + query);
-    isBusy = true;
-    sendBtn.disabled = true;
-    showProgress('Searching site...', query);
-
-    try {
-      const pageData = await getPageData();
-      api.runtime.sendMessage({
-        type: 'asksite',
-        query,
-        searchUrl: pageData._searchUrl || '',
-        pageUrl: pageData.url
-      });
+      if (mode === 'search' || mode === 'summarize' || mode === 'contact') {
+        showProgress('Finding relevant pages...', '');
+        api.runtime.sendMessage({ type: 'ask', question, pageData });
+      } else if (mode === 'asksite') {
+        showProgress('Searching site...', question);
+        api.runtime.sendMessage({
+          type: 'asksite',
+          query: question,
+          searchUrl: pageData._searchUrl || '',
+          pageUrl: pageData.url
+        });
+      } else {
+        showProgress('Researching...', 'Finding relevant pages');
+        api.runtime.sendMessage({ type: 'research', question, pageData });
+      }
     } catch (err) {
       clearProgress();
       appendError(err.message);
@@ -170,14 +312,13 @@
     } else if (msg.type === 'answer') {
       clearProgress();
       appendAnswer(msg.text, msg.sources);
-      const triedUrls = (msg.sources || []).map(s => s.url).filter(Boolean);
-      conversationHistory.push({ question: msg.question, answer: msg.text, tried_urls: triedUrls });
-      if (conversationHistory.length > 5) conversationHistory.shift();
-      isBusy = false;
-      sendBtn.disabled = false;
-    } else if (msg.type === 'nokey') {
-      clearProgress();
-      appendNoKey();
+      // Track conversation history for this site
+      if (currentOrigin) {
+        const site = getSite(currentOrigin);
+        const triedUrls = (msg.sources || []).map(s => s.url).filter(Boolean);
+        site.history.push({ question: msg.question, answer: msg.text, tried_urls: triedUrls });
+        if (site.history.length > 5) site.history.shift();
+      }
       isBusy = false;
       sendBtn.disabled = false;
     } else if (msg.type === 'error') {
@@ -185,54 +326,12 @@
       appendError(msg.message);
       isBusy = false;
       sendBtn.disabled = false;
-    } else if (msg.type === 'pageInfo') {
-      // Update Ask Site pill based on page capabilities
-      if (msg.hasSearch) {
-        askSitePill.classList.remove('disabled');
-        askSitePill.title = 'Search this site';
-        askSitePill.style.pointerEvents = '';
-      } else {
-        askSitePill.classList.add('disabled');
-        askSitePill.title = 'No site search detected';
-        askSitePill.style.pointerEvents = 'none';
-      }
     }
-  });
-
-  /* ── On panel open, request page info from current tab ── */
-
-  async function refreshPageInfo() {
-    try {
-      const tab = await getActiveTab();
-      if (!tab) return;
-      api.tabs.sendMessage(tab.id, { type: 'getPageInfo' }, (response) => {
-        if (api.runtime.lastError) return;
-        if (response) {
-          if (response.hasSearch) {
-            askSitePill.classList.remove('disabled');
-            askSitePill.title = 'Search this site';
-            askSitePill.style.pointerEvents = '';
-          }
-        }
-      });
-    } catch { /* ignore */ }
-  }
-
-  refreshPageInfo();
-
-  // Re-check when tab changes
-  api.tabs.onActivated.addListener(() => refreshPageInfo());
-  api.tabs.onUpdated.addListener((tabId, changeInfo) => {
-    if (changeInfo.status === 'complete') refreshPageInfo();
   });
 
   /* ── UI helpers ── */
 
   let progressEl = null;
-
-  function hideEmptyState() {
-    if (emptyState && emptyState.parentNode) emptyState.remove();
-  }
 
   function showProgress(phase, detail) {
     if (!progressEl) {
@@ -252,14 +351,6 @@
       progressEl.remove();
       progressEl = null;
     }
-  }
-
-  function appendMsg(role, text) {
-    const div = document.createElement('div');
-    div.className = `waa-msg waa-msg-${role}`;
-    div.innerHTML = `<div class="waa-msg-content">${escHtml(text)}</div>`;
-    messages.appendChild(div);
-    messages.scrollTop = messages.scrollHeight;
   }
 
   function appendAnswer(text, sources) {
@@ -284,30 +375,19 @@
     }
 
     html += `</div>`;
-    html += `<button class="waa-retry">Not right? Search again</button>`;
+    html += `<button class="waa-retry">Not right? Try again</button>`;
     div.innerHTML = html;
 
     div.querySelector('.waa-retry').addEventListener('click', () => {
       if (lastQuestion && !isBusy) {
-        appendMsg('user', '(searching again...)');
-        submit(lastQuestion, true);
+        storeAndAppendMsg('user', '(trying again...)');
+        submitWithMode(null, lastQuestion);
       }
     });
 
     messages.appendChild(div);
     messages.scrollTop = messages.scrollHeight;
-  }
-
-  function appendNoKey() {
-    const div = document.createElement('div');
-    div.className = 'waa-error';
-    div.innerHTML = 'No provider configured. <a class="waa-error-link" href="#">Open settings</a> to log in or add an API key.';
-    div.querySelector('.waa-error-link').addEventListener('click', (e) => {
-      e.preventDefault();
-      api.runtime.sendMessage({ type: 'openSettings' });
-    });
-    messages.appendChild(div);
-    messages.scrollTop = messages.scrollHeight;
+    if (currentOrigin) storeMsg(currentOrigin, div);
   }
 
   function appendError(text) {
@@ -316,6 +396,7 @@
     div.textContent = text;
     messages.appendChild(div);
     messages.scrollTop = messages.scrollHeight;
+    if (currentOrigin) storeMsg(currentOrigin, div);
   }
 
   function formatAnswer(text) {

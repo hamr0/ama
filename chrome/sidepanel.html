@@ -24,19 +24,25 @@
     </select>
   </div>
 
+  <div class="waa-site-bar" id="site-bar">
+    <span class="waa-site-dot"></span>
+    <span class="waa-site-name" id="site-name">No page loaded</span>
+  </div>
+
   <div class="waa-messages" id="messages">
-    <div class="waa-empty" id="empty-state">Ask this site anything.<br>The agent will analyze the page structure to find your answer.</div>
+    <div class="waa-empty" id="empty-state">Ask anything about this site.<br>I'll read multiple pages and answer in your language.</div>
   </div>
 
   <div class="waa-pills" id="pills">
+    <button class="waa-pill" data-action="search">Search</button>
     <button class="waa-pill" data-action="summarize">Summarize</button>
-    <button class="waa-pill" data-action="contact">Contact/FAQ</button>
-    <button class="waa-pill" data-action="asksite" id="pill-asksite" title="No site search detected">Ask Site</button>
+    <button class="waa-pill" data-action="contact">Contact</button>
+    <button class="waa-pill disabled" data-action="asksite" id="pill-asksite" title="No site search detected">Site Search</button>
     <button class="waa-pill disabled" data-action="compare" title="Coming soon">Compare</button>
   </div>
 
   <div class="waa-input-area">
-    <input class="waa-input" id="input" type="text" placeholder="Ask this site..." autocomplete="off">
+    <input class="waa-input" id="input" type="text" placeholder="Ask anything about this site..." autocomplete="off">
     <button class="waa-send" id="send-btn">Ask</button>
   </div>
 

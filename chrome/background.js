@@ -730,12 +730,130 @@ async function handleSiteSearch(query, searchUrl, pageUrl) {
   }
 }
 
+/* ── Research: pick pages, fetch them, synthesize answer ── */
+
+async function handleResearch(question, pageData) {
+  const settings = await getSettings();
+  const origin = new URL(pageData.url).origin;
+
+  try {
+    // Phase 1: Find relevant pages (same as handleQuestion)
+    sendToSidePanel({ type: 'progress', phase: 'Researching...', detail: 'Fetching sitemap' });
+
+    const sitemapUrls = await fetchSitemap(origin, new URL(pageData.url).pathname);
+    const sitemapPaths = (sitemapUrls || [])
+      .filter(u => u !== pageData.url)
+      .map(u => ({ text: shortenUrl(u), url: u }));
+
+    const pageLinks = (pageData.links || []).map(l => ({
+      text: l.text,
+      url: l.url.startsWith('/') ? origin + l.url : l.url
+    }));
+
+    const seen = new Set([pageData.url.split('#')[0]]);
+    const triedUrls = (pageData.history || []).flatMap(h => h.tried_urls || []);
+    for (const u of triedUrls) seen.add(u.split('#')[0]);
+
+    const allLinks = [];
+    for (const link of [...pageLinks, ...sitemapPaths]) {
+      const normalized = link.url.split('#')[0];
+      if (seen.has(normalized)) continue;
+      seen.add(normalized);
+      allLinks.push(link);
+    }
+
+    if (allLinks.length === 0) {
+      // No links to explore — just answer from current page ARIA tree
+      sendToSidePanel({ type: 'progress', phase: 'Answering from current page...', detail: '' });
+      const answer = await callLLMRaw(settings,
+        'Answer the user\'s question based on the page content below. Answer in English even if the content is in another language. Be concise and helpful.',
+        `Page: ${pageData.title}\nURL: ${pageData.url}\n\n${pageData.ariaTree}\n\nQuestion: ${question}`
+      );
+      sendToSidePanel({ type: 'answer', text: answer, question, sources: [{ url: pageData.url, title: pageData.title }] });
+      return;
+    }
+
+    // LLM picks top 5 pages
+    sendToSidePanel({ type: 'progress', phase: 'Researching...', detail: `Picking from ${allLinks.length} pages` });
+
+    const numberedLinks = allLinks.slice(0, 150);
+    const linkList = numberedLinks.map((l, i) => `${i + 1}. [${l.text}] -> ${shortenUrl(l.url)}`).join('\n');
+
+    const pickResult = await callLLMJson(settings,
+      'Pick the 5 best links to answer a question. Return ONLY line numbers as JSON.',
+      `${linkList}\n\nQuestion: ${question}\n\nReturn exactly 5 picks.\nExample: {"picks":[{"n":3,"label":"About us"},{"n":7,"label":"Philosophy"}],"reason":"brief"}`
+    );
+
+    const picks = (pickResult.picks || []).slice(0, 5);
+    const selectedUrls = picks
+      .filter(p => p.n >= 1 && p.n <= numberedLinks.length)
+      .map(p => ({ url: numberedLinks[p.n - 1].url, label: p.label || numberedLinks[p.n - 1].text }));
+
+    if (selectedUrls.length === 0) {
+      sendToSidePanel({ type: 'answer', text: 'Could not identify relevant pages. Try asking differently.', question, sources: [] });
+      return;
+    }
+
+    // Phase 2: Fetch selected pages
+    sendToSidePanel({ type: 'progress', phase: 'Reading pages...', detail: `0/${selectedUrls.length}` });
+
+    const pageContents = [];
+    for (let i = 0; i < selectedUrls.length; i++) {
+      const { url, label } = selectedUrls[i];
+      sendToSidePanel({ type: 'progress', phase: 'Reading pages...', detail: `${i + 1}/${selectedUrls.length}: ${label}` });
+
+      const html = await fetchPage(url);
+      if (html) {
+        const title = extractTitleFromHtml(html);
+        const text = extractTextFromHtml(html);
+        pageContents.push({
+          url,
+          title: title || label,
+          text: truncateText(text, 3000)
+        });
+      }
+      // Small delay between fetches to be polite
+      if (i < selectedUrls.length - 1) await delay(300);
+    }
+
+    if (pageContents.length === 0) {
+      sendToSidePanel({ type: 'answer', text: 'Could not load any of the selected pages.', question, sources: [] });
+      return;
+    }
+
+    // Phase 3: Synthesize answer from all page contents
+    sendToSidePanel({ type: 'progress', phase: 'Synthesizing answer...', detail: `From ${pageContents.length} pages` });
+
+    const contentBlock = pageContents.map((p, i) =>
+      `--- Page ${i + 1}: ${p.title} (${shortenUrl(p.url)}) ---\n${p.text}`
+    ).join('\n\n');
+
+    const systemPrompt = `You are a research assistant. The user asked a question about a website. Below is content from ${pageContents.length} pages on that site. Synthesize a clear, comprehensive answer in English, even if the source content is in another language. Cite which pages you drew from. Be concise but thorough.`;
+
+    const userPrompt = `${contentBlock}\n\n---\nQuestion: ${question}`;
+
+    const answer = await callLLMRaw(settings, systemPrompt, userPrompt);
+
+    const sources = pageContents.map(p => ({
+      url: p.url,
+      title: p.title
+    }));
+
+    sendToSidePanel({ type: 'answer', text: answer, question, sources });
+
+  } catch (err) {
+    console.error('Research error:', err);
+    sendToSidePanel({ type: 'error', message: err.message || 'Research failed.' });
+  }
+}
+
 /* ── Message listener ── */
 
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'ask') {
-    // Message from side panel with page data
     handleQuestion(msg.question, msg.pageData, sender.tab?.id);
+  } else if (msg.type === 'research') {
+    handleResearch(msg.question, msg.pageData);
   } else if (msg.type === 'asksite') {
     // Resolve search URL template
     let searchUrl = msg.searchUrl;
