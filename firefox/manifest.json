@@ -1,5 +1,5 @@
 {
-  "manifest_version": 3,
+  "manifest_version": 2,
   "name": "AMA",
   "version": "0.2.0",
   "description": "Talk to any website. Not just the page — the whole site.",
@@ -8,17 +8,23 @@
     "48": "icon48.png",
     "128": "icon128.png"
   },
-  "permissions": ["storage", "activeTab", "scripting", "sidePanel"],
-  "host_permissions": ["<all_urls>"],
+  "permissions": [
+    "storage",
+    "activeTab",
+    "tabs",
+    "<all_urls>"
+  ],
   "background": {
-    "service_worker": "background.js"
+    "scripts": ["background.js"],
+    "persistent": false
   },
   "content_scripts": [{
     "matches": ["<all_urls>"],
     "js": ["content.js"]
   }],
-  "action": {
+  "sidebar_action": {
     "default_title": "AMA",
+    "default_panel": "sidepanel.html",
     "default_icon": {
       "16": "icon16.png",
       "48": "icon48.png"
@@ -28,7 +34,10 @@
     "page": "options.html",
     "open_in_tab": true
   },
-  "side_panel": {
-    "default_path": "sidepanel.html"
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "ama@extension",
+      "strict_min_version": "109.0"
+    }
   }
 }

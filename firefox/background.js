@@ -1,19 +1,9 @@
-/* AMA — Background service worker
+/* AMA — Background script (Firefox)
  * 2-phase pipeline: ARIA tree analysis -> optional page fetch
- * 1-2 LLM calls max per question.
- * Opens side panel on extension icon click.
+ * Sidebar opens via sidebar_action in manifest.
  */
 
 const api = typeof browser !== 'undefined' ? browser : chrome;
-
-/* ── Side Panel: open on extension icon click ── */
-
-api.action.onClicked.addListener(async (tab) => {
-  await api.sidePanel.open({ windowId: tab.windowId });
-});
-
-// Enable side panel to open on action click
-api.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 
 /* ── Settings ── */
 

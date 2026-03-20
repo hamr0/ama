@@ -216,10 +216,7 @@
 
   async function ensureContentScript(tabId) {
     try {
-      await api.scripting.executeScript({
-        target: { tabId },
-        files: ['content.js']
-      });
+      await api.tabs.executeScript(tabId, { file: 'content.js' });
     } catch { /* may fail on chrome:// pages etc */ }
     // Small delay for script to initialize
     await new Promise(r => setTimeout(r, 200));
