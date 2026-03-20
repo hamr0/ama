@@ -1,6 +1,6 @@
 # AMA
 
-**Ask Me Anything — talk to any website using your existing AI subscription.**
+**Ask Me Anything. Talk to any website. Not just the page — the whole site with your existing AI subscription.**
 
 ## The problem
 
