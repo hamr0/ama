@@ -29,70 +29,45 @@ Open the sidebar, type your question in plain English, and AMA:
 
 No more clicking through 30 pages to find a phone number. No more Google Translating page by page. No more giving up because the site is too old, too broken, or too foreign.
 
-## Features
+## Six things it does
 
-### Research (default)
-Type any question — AMA finds relevant pages on the site, fetches up to 5 of them, reads the content, and gives you a synthesized answer in English. Works across languages: ask in English about a Dutch website and get an English answer with page citations.
+**Research** (default) — ask any question. It finds relevant pages across the entire site, reads them, and gives you a synthesized answer in English with citations. Even if the site is in a language you don't speak.
 
-### Search
-Switch to Search mode to get the 5 most relevant links on the site without reading them — useful when you want to browse the actual pages yourself.
+**Search** — finds the 5 most relevant pages on any site, even when the site's own navigation is broken.
 
-### Summarize
-One click. Gets a concise summary of the current page, translated to English if needed.
+**Site Search** — uses the site's own search engine, fetches the results, and filters them through AI so you get answers, not 240 unranked links.
 
-### Contact
-One click. Finds contact information, customer service, FAQ, and help pages across the site.
+**Compare** — select open tabs and get a structured side-by-side: differences, similarities, pros and cons. Works across sites.
 
-### Site Search
-When a site has its own search, AMA uses it — fetches the results page, extracts links, and lets the AI pick the top 5 most relevant results.
+**Summarize** — one click, concise summary of any page, translated to English if needed.
 
-### Compare
-Compare the current page against other open tabs. Select 1-4 tabs and get a structured comparison: differences, similarities, pros and cons. Works cross-site (Brand A vs Brand B) and same-site (Model A vs Model B).
+**Contact** — instantly surfaces contact info, FAQ, and support pages buried deep in the site.
 
-### Per-site conversations
 Each website gets its own conversation thread. Switch tabs and the sidebar shows that site's chat. Switch back and your previous Q&A is still there.
 
 ## No API keys
 
-AMA uses your existing ChatGPT, Claude, or Gemini login. If you're already paying for a subscription, AMA uses it — no separate API key, no extra cost.
+Uses your existing ChatGPT, Claude, or Gemini subscription. No API keys. No accounts. Runs entirely in your browser. Nothing leaves your machine except the prompt to your chosen AI provider.
 
-## Install
+## Try it now
+
+Store approval pending — install locally in under a minute:
 
 ### Chrome
-1. Clone this repo
-2. Open `chrome://extensions`, enable Developer Mode
-3. Load unpacked → select the `chrome/` folder
+1. Download this repo (Code → Download ZIP) and unzip
+2. Go to `chrome://extensions` and turn on **Developer mode** (top right)
+3. Click **Load unpacked** → select the `chrome/` folder
 4. Click the AMA icon to open the sidebar
 
 ### Firefox
-1. Clone this repo
-2. Open `about:debugging#/runtime/this-firefox`
-3. Load Temporary Add-on → select `firefox/manifest.json`
-4. Open the sidebar from the Firefox sidebar menu
+1. Download this repo (Code → Download ZIP) and unzip
+2. Go to `about:debugging#/runtime/this-firefox`
+3. Click **Load Temporary Add-on** → pick any file in the `firefox/` folder
+4. Click the AMA icon to toggle the sidebar
 
 ### From stores
 - [Chrome Web Store](https://chromewebstore.google.com/) — search "AMA"
 - [Firefox Add-ons](https://addons.mozilla.org/) — search "AMA"
-
-## How it works
-
-```
-User asks question in sidebar
-  ↓
-Content script extracts ARIA tree + links from active tab
-  ↓
-Background fetches sitemap, scores links
-  ↓
-AI picks most relevant pages
-  ↓
-Background fetches those pages, extracts text
-  ↓
-AI synthesizes answer in English with citations
-  ↓
-Sidebar displays answer with source links
-```
-
-No data leaves your browser except to your chosen AI provider. No tracking. No accounts. No cloud.
 
 ## License
 
