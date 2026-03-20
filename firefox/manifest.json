@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "AMA",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Talk to any website. Not just the page — the whole site.",
   "icons": {
     "16": "icon16.png",
@@ -25,6 +25,14 @@
   "sidebar_action": {
     "default_title": "AMA",
     "default_panel": "sidepanel.html",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png"
+    },
+    "open_at_install": true
+  },
+  "browser_action": {
+    "default_title": "Toggle AMA sidebar",
     "default_icon": {
       "16": "icon16.png",
       "48": "icon48.png"

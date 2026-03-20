@@ -5,6 +5,11 @@
 
 const api = typeof browser !== 'undefined' ? browser : chrome;
 
+/* ── Toggle sidebar on toolbar button click ── */
+api.browserAction.onClicked.addListener(() => {
+  api.sidebarAction.toggle();
+});
+
 /* ── Settings ── */
 
 const DEFAULTS = {
