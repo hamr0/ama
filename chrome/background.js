@@ -1,4 +1,4 @@
-/* WeAreAsking — Background service worker
+/* AMA — Background service worker
  * 2-phase pipeline: ARIA tree analysis -> optional page fetch
  * 1-2 LLM calls max per question.
  * Opens side panel on extension icon click.
@@ -588,7 +588,7 @@ async function handleQuestion(question, pageData, senderTabId) {
         (triedUrls.length > 0 ? `Already tried: ${triedUrls.map(u => shortenUrl(u)).join(', ')}\n` : '');
     }
 
-    const systemPrompt = `Pick the 5 best links to answer a question. Return ONLY line numbers as JSON.`;
+    const systemPrompt = `Pick the 5 best links to answer a question. Return ONLY line numbers as JSON. Labels MUST be in English.`;
 
     const userPrompt = `${linkList}
 ${historySection}
@@ -606,7 +606,7 @@ Example: {"picks":[{"n":3,"label":"Deliveries & returns"},{"n":17,"label":"FAQ"}
       .filter(p => p.n >= 1 && p.n <= numberedLinks.length)
       .map(p => {
         const link = numberedLinks[p.n - 1];
-        return { url: link.url, title: p.label || link.text, relevant_excerpt: link.text };
+        return { url: link.url, title: p.label || link.text };
       });
 
     if (sources.length === 0) {
@@ -705,7 +705,7 @@ async function handleSiteSearch(query, searchUrl, pageUrl) {
     const numberedLinks = links.slice(0, 100);
     const linkList = numberedLinks.map((l, i) => `${i + 1}. [${l.text}] -> ${l.url}`).join('\n');
 
-    const systemPrompt = `Pick the 5 best links to answer a question. Return ONLY line numbers as JSON.`;
+    const systemPrompt = `Pick the 5 best links to answer a question. Return ONLY line numbers as JSON. Labels MUST be in English.`;
     const userPrompt = `Site search results for "${query}":\n${linkList}\n\nQuestion: ${query}\n\nReturn exactly 5 picks. For each, give the line number and a short English label.\nExample: {"picks":[{"n":3,"label":"Form 1065 instructions"},{"n":7,"label":"Filing guide"}],"reason":"brief explanation"}`;
 
     const result = await callLLMJson(settings, systemPrompt, userPrompt);
@@ -715,7 +715,7 @@ async function handleSiteSearch(query, searchUrl, pageUrl) {
       .filter(p => p.n >= 1 && p.n <= numberedLinks.length)
       .map(p => {
         const link = numberedLinks[p.n - 1];
-        return { url: origin + link.url, title: p.label || link.text, relevant_excerpt: link.text };
+        return { url: origin + link.url, title: p.label || link.text };
       });
 
     sendToSidePanel({
@@ -780,7 +780,7 @@ async function handleResearch(question, pageData) {
     const linkList = numberedLinks.map((l, i) => `${i + 1}. [${l.text}] -> ${shortenUrl(l.url)}`).join('\n');
 
     const pickResult = await callLLMJson(settings,
-      'Pick the 5 best links to answer a question. Return ONLY line numbers as JSON.',
+      'Pick the 5 best links to answer a question. Return ONLY line numbers as JSON. Labels MUST be in English.',
       `${linkList}\n\nQuestion: ${question}\n\nReturn exactly 5 picks.\nExample: {"picks":[{"n":3,"label":"About us"},{"n":7,"label":"Philosophy"}],"reason":"brief"}`
     );
 
@@ -804,11 +804,10 @@ async function handleResearch(question, pageData) {
 
       const html = await fetchPage(url);
       if (html) {
-        const title = extractTitleFromHtml(html);
         const text = extractTextFromHtml(html);
         pageContents.push({
           url,
-          title: title || label,
+          title: label, // English label from LLM pick
           text: truncateText(text, 3000)
         });
       }

@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "weareasking",
+  "name": "AMA",
   "version": "0.2.0",
   "description": "Talk to any website. Not just the page — the whole site.",
   "icons": {
@@ -23,7 +23,7 @@
     "js": ["content.js"]
   }],
   "action": {
-    "default_title": "weareasking",
+    "default_title": "AMA",
     "default_icon": {
       "16": "icon16.png",
       "48": "icon48.png"

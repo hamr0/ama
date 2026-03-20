@@ -1,4 +1,4 @@
-/* WeAreAsking — Options page */
+/* AMA — Options page */
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);

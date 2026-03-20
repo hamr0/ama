@@ -1,4 +1,4 @@
-/* weareasking — Side Panel UI
+/* AMA — Side Panel UI
  * Default mode: Research (fetches pages, synthesizes answer)
  * Per-site conversations: auto-follows active tab
  */

@@ -1,4 +1,4 @@
-/* WeAreAsking — Content script
+/* AMA — Content script
  * Builds ARIA tree from DOM, extracts page data.
  * No UI — side panel handles all display.
  * Responds to messages requesting page data.
