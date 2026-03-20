@@ -1,10 +1,20 @@
 {
   "manifest_version": 3,
-  "name": "WeAreAsking",
-  "version": "0.1.0",
+  "name": "weareasking",
+  "version": "0.2.0",
   "description": "Talk to any website. Not just the page — the whole site.",
-  "permissions": ["storage", "activeTab"],
-  "host_permissions": ["<all_urls>"],
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "permissions": ["storage", "activeTab", "cookies", "scripting", "sidePanel"],
+  "host_permissions": [
+    "<all_urls>",
+    "*://*.chatgpt.com/*",
+    "*://*.claude.ai/*",
+    "*://*.gemini.google.com/*"
+  ],
   "background": {
     "service_worker": "background.js"
   },
@@ -13,14 +23,17 @@
     "js": ["content.js"]
   }],
   "action": {
-    "default_title": "WeAreAsking"
+    "default_title": "weareasking",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png"
+    }
   },
   "options_ui": {
     "page": "options.html",
     "open_in_tab": true
   },
-  "web_accessible_resources": [{
-    "resources": ["widget.css"],
-    "matches": ["<all_urls>"]
-  }]
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  }
 }

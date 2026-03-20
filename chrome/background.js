@@ -1,80 +1,33 @@
 /* WeAreAsking — Background service worker
- * Pipeline: DECOMPOSE → SCAN → NAVIGATE → EXTRACT → (repeat 3 rounds) → ANSWER
- * All LLM responses are forced JSON to limit hallucinations.
+ * 2-phase pipeline: ARIA tree analysis -> optional page fetch
+ * 1-2 LLM calls max per question.
+ * Opens side panel on extension icon click.
  */
 
 const api = typeof browser !== 'undefined' ? browser : chrome;
 
+/* ── Side Panel: open on extension icon click ── */
+
+api.action.onClicked.addListener(async (tab) => {
+  await api.sidePanel.open({ windowId: tab.windowId });
+});
+
+// Enable side panel to open on action click
+api.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+
 /* ── Settings ── */
 
 const DEFAULTS = {
-  provider: 'openai',
-  model: { anthropic: 'claude-sonnet-4-20250514', openai: 'gpt-4o-mini' },
-  maxPages: 3,
-  maxRounds: 3,
-  fetchDelay: 1200,
+  provider: 'claude-web',
   fetchTimeout: 8000
 };
 
 async function getSettings() {
-  const s = await api.storage.local.get(['provider', 'apiKey', 'model', 'maxPages']);
-  const provider = s.provider || DEFAULTS.provider;
-  return {
-    provider,
-    apiKey: s.apiKey || '',
-    model: s.model || DEFAULTS.model[provider],
-    maxPages: s.maxPages || DEFAULTS.maxPages
-  };
+  const s = await api.storage.local.get(['provider']);
+  return { provider: s.provider || DEFAULTS.provider };
 }
 
-/* ── HTML extraction ── */
-
-function extractHeadingsFromHtml(html) {
-  const headings = [];
-  const re = /<(h[1-6])[^>]*>([\s\S]*?)<\/\1>/gi;
-  let m;
-  while ((m = re.exec(html)) !== null) {
-    const level = parseInt(m[1][1], 10);
-    const text = m[2].replace(/<[^>]+>/g, '').trim();
-    if (text && text.length < 200) {
-      headings.push({ level, text });
-    }
-  }
-  return headings;
-}
-
-function extractLinksFromHtml(html, baseUrl) {
-  const links = [];
-  const seen = new Set();
-  const origin = new URL(baseUrl).origin;
-
-  // Find nav/header regions to tag links
-  const navRegions = [];
-  const navRe = /<(nav|header)[^>]*>([\s\S]*?)<\/\1>/gi;
-  let nm;
-  while ((nm = navRe.exec(html)) !== null) {
-    navRegions.push({ start: nm.index, end: nm.index + nm[0].length });
-  }
-
-  const re = /<a\s[^>]*href=["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-  let m;
-  while ((m = re.exec(html)) !== null) {
-    let href = m[1];
-    const text = m[2].replace(/<[^>]+>/g, '').trim();
-    if (!text || text.length > 200) continue;
-    try {
-      const url = new URL(href, baseUrl);
-      if (url.origin !== origin) continue;
-      href = url.href;
-    } catch { continue; }
-    if (seen.has(href)) continue;
-    seen.add(href);
-    if (/\.(pdf|jpg|png|gif|svg|zip|mp4|mp3|css|js)$/i.test(href)) continue;
-    const inNav = navRegions.some(r => m.index >= r.start && m.index <= r.end);
-    links.push({ url: href, text, nav: inNav });
-  }
-  return links;
-}
+/* ── HTML extraction (for fetched pages) ── */
 
 function extractTextFromHtml(html) {
   let text = html
@@ -101,10 +54,8 @@ function extractTitleFromHtml(html) {
 /* ── Sitemap + Robots ── */
 
 async function fetchSitemap(origin, currentPath) {
-  // Step 1: check robots.txt for Sitemap directives
   const sitemapUrls = [origin + '/sitemap.xml'];
 
-  // Detect locale from current path (e.g. /nl-nl/... → nl-nl)
   const localeMatch = (currentPath || '').match(/^\/([a-z]{2}-[a-z]{2})\b/i);
   const locale = localeMatch ? localeMatch[1].toLowerCase() : '';
 
@@ -115,7 +66,6 @@ async function fetchSitemap(origin, currentPath) {
       for (const m of matches) {
         const url = m[1].trim();
         if (!sitemapUrls.includes(url)) {
-          // Prioritize locale-matching sitemaps
           if (locale && url.toLowerCase().includes(locale)) {
             sitemapUrls.unshift(url);
           } else {
@@ -126,17 +76,15 @@ async function fetchSitemap(origin, currentPath) {
     }
   } catch { /* robots.txt may not exist */ }
 
-  // Step 2: try each sitemap URL
   for (const smUrl of sitemapUrls) {
     try {
       const xml = await fetchText(smUrl);
       if (!xml) continue;
 
-      // Check for sitemap index (contains other sitemaps)
       if (xml.includes('<sitemapindex')) {
         const indexUrls = [...xml.matchAll(/<loc>\s*(.*?)\s*<\/loc>/gi)]
           .map(m => m[1].trim())
-          .slice(0, 5); // check up to 5 sub-sitemaps
+          .slice(0, 5);
         const allUrls = [];
         for (const iUrl of indexUrls) {
           const subXml = await fetchText(iUrl);
@@ -148,7 +96,6 @@ async function fetchSitemap(origin, currentPath) {
         if (allUrls.length > 0) return allUrls;
       }
 
-      // Regular sitemap
       const urls = parseSitemapUrls(xml, origin);
       if (urls.length > 0) return urls;
     } catch { continue; }
@@ -162,15 +109,14 @@ function parseSitemapUrls(xml, origin) {
   let m;
   while ((m = re.exec(xml)) !== null) {
     const url = m[1].trim();
-    // Same origin only
     try {
-      if (new URL(url).origin === new URL(origin).origin) {
-        urls.push(url);
-      }
+      if (new URL(url).origin === new URL(origin).origin) urls.push(url);
     } catch { /* skip */ }
   }
   return urls;
 }
+
+/* ── Fetch ── */
 
 async function fetchText(url) {
   const controller = new AbortController();
@@ -182,8 +128,6 @@ async function fetchText(url) {
   } catch { return null; }
   finally { clearTimeout(timer); }
 }
-
-/* ── Fetch ── */
 
 async function fetchPage(url) {
   const controller = new AbortController();
@@ -202,424 +146,488 @@ function delay(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
-/* ── LLM API (JSON forced) ── */
+/* ── LLM API ── */
 
 async function callLLMJson(settings, systemPrompt, userMessage) {
-  const raw = await callLLMRaw(settings, systemPrompt, userMessage, true);
-  // Strip markdown fences if model wraps in ```json
-  const cleaned = raw.replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim();
+  const raw = await callLLMRaw(settings, systemPrompt, userMessage);
+  // Strip markdown fences
+  let cleaned = raw.replace(/```json\s*/gi, '').replace(/```/g, '').trim();
+  // If response has prose around the JSON, extract the JSON object
+  const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+  if (jsonMatch) cleaned = jsonMatch[0];
   return JSON.parse(cleaned);
 }
 
-async function callLLMRaw(settings, systemPrompt, userMessage, json = false) {
-  if (settings.provider === 'anthropic') {
-    return callAnthropic(settings, systemPrompt, userMessage);
-  }
-  return callOpenAI(settings, systemPrompt, userMessage, json);
+async function callLLMRaw(settings, systemPrompt, userMessage) {
+  if (settings.provider === 'chatgpt-web') return callChatGPTWeb(systemPrompt, userMessage);
+  if (settings.provider === 'claude-web') return callClaudeWeb(systemPrompt, userMessage);
+  if (settings.provider === 'gemini-web') return callGeminiWeb(systemPrompt, userMessage);
+  throw new Error('Unknown provider: ' + settings.provider);
 }
 
-async function callAnthropic(settings, systemPrompt, userMessage) {
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
+/* ── Pinned-tab approach for ChatGPT + Gemini ──
+ * Opens provider in a pinned background tab, injects prompt via DOM,
+ * polls for response, sends result back via message passing.
+ * Claude uses direct HTTP (works without tabs).
+ */
+
+const _webProviderCallbacks = new Map();
+
+async function findOrCreatePinnedTab(matchPattern, createUrl) {
+  const tabs = await api.tabs.query({ url: matchPattern });
+  if (tabs.length > 0) return tabs[0];
+  return api.tabs.create({ url: createUrl, active: false, pinned: true });
+}
+
+function waitForTabLoad(tabId) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      api.tabs.onUpdated.removeListener(check);
+      resolve(); // don't reject, just proceed
+    }, 20000);
+    function check(tid, info) {
+      if (tid === tabId && info.status === 'complete') {
+        api.tabs.onUpdated.removeListener(check);
+        clearTimeout(timeout);
+        resolve();
+      }
+    }
+    api.tabs.onUpdated.addListener(check);
+    api.tabs.get(tabId).then(tab => {
+      if (tab.status === 'complete') {
+        api.tabs.onUpdated.removeListener(check);
+        clearTimeout(timeout);
+        resolve();
+      }
+    });
+  });
+}
+
+async function callViaPinnedTab(provider, prompt, matchPattern, freshUrl) {
+  const tab = await findOrCreatePinnedTab(matchPattern, freshUrl);
+  // Navigate to fresh conversation URL
+  await api.tabs.update(tab.id, { url: freshUrl });
+  await waitForTabLoad(tab.id);
+  await delay(2500); // SPA hydration
+
+  const callId = crypto.randomUUID();
+
+  await api.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: tabProviderDriver,
+    args: [provider, prompt, callId]
+  });
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      _webProviderCallbacks.delete(callId);
+      reject(new Error(`${provider} response timed out after 90s`));
+    }, 90000);
+    _webProviderCallbacks.set(callId, (result) => {
+      clearTimeout(timeout);
+      _webProviderCallbacks.delete(callId);
+      if (result.error) reject(new Error(result.error));
+      else resolve(result.text);
+    });
+  });
+}
+
+/* Driver function injected into provider tabs */
+function tabProviderDriver(provider, prompt, callId) {
+  const api = typeof browser !== 'undefined' ? browser : chrome;
+  function done(result) {
+    api.runtime.sendMessage({ type: 'webProviderResult', callId, ...result });
+  }
+  try {
+    let editor, sendSelector, responseSelector;
+
+    if (provider === 'chatgpt') {
+      editor = document.querySelector('#prompt-textarea, div[contenteditable="true"][id="prompt-textarea"]');
+      sendSelector = '[data-testid="send-button"], button[aria-label*="Send"], form button[type="submit"]';
+      responseSelector = '[data-message-author-role="assistant"]';
+    } else if (provider === 'gemini') {
+      editor = document.querySelector('.ql-editor, div[contenteditable="true"][aria-label*="prompt"], rich-textarea .ql-editor, div[contenteditable="true"]');
+      sendSelector = 'button[aria-label="Send message"], button.send-button, button[data-test-id="send-button"], .send-button-container button';
+      responseSelector = '.model-response-text, .response-container, message-content';
+    }
+
+    if (!editor) return done({ error: `${provider} input not found. Is the site loaded and logged in?` });
+
+    // Count existing responses before we submit
+    const prevCount = document.querySelectorAll(responseSelector).length;
+
+    // Insert text — use execCommand for ProseMirror/Quill compatibility
+    editor.focus();
+    document.execCommand('selectAll', false, null);
+    document.execCommand('delete', false, null);
+    document.execCommand('insertText', false, prompt);
+
+    // Also try direct value setting as fallback
+    if (!editor.textContent.trim()) {
+      editor.innerHTML = '<p>' + prompt.replace(/</g, '&lt;') + '</p>';
+      editor.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    }
+
+    setTimeout(() => {
+      const sendBtn = document.querySelector(sendSelector);
+      if (!sendBtn) return done({ error: `${provider} send button not found.` });
+      sendBtn.click();
+
+      let attempts = 0, lastText = '', stableCount = 0;
+      const poll = setInterval(() => {
+        attempts++;
+        const responses = document.querySelectorAll(responseSelector);
+        if (responses.length > prevCount) {
+          const text = responses[responses.length - 1].innerText.trim();
+          if (text && text === lastText) {
+            stableCount++;
+            if (stableCount >= 4) { clearInterval(poll); done({ text }); }
+          } else { lastText = text; stableCount = 0; }
+        }
+        if (attempts >= 180) {
+          clearInterval(poll);
+          done(lastText ? { text: lastText } : { error: `${provider} timed out.` });
+        }
+      }, 500);
+    }, 800);
+  } catch (e) { done({ error: e.message }); }
+}
+
+async function callChatGPTWeb(systemPrompt, userMessage) {
+  return callViaPinnedTab('chatgpt', systemPrompt + '\n\n' + userMessage,
+    '*://*.chatgpt.com/*', 'https://chatgpt.com/');
+}
+
+/* ── Gemini Web Session (HTTP, no tab) ── */
+
+async function callGeminiWeb(systemPrompt, userMessage) {
+  // Step 1: Fetch the Gemini app page to extract SNlM0e token
+  const pageRes = await fetch('https://gemini.google.com/app', {
+    credentials: 'include',
+    headers: { 'Accept': 'text/html' }
+  });
+  if (!pageRes.ok) throw new Error('Not logged in to Gemini. Open settings and log in to Google.');
+  const pageHtml = await pageRes.text();
+
+  const tokenMatch = pageHtml.match(/"SNlM0e":"(.*?)"/);
+  if (!tokenMatch) throw new Error('Gemini session expired or not logged in. Please log in to Google.');
+  const snlm0e = tokenMatch[1];
+
+  // Extract build label (bl param)
+  const blMatch = pageHtml.match(/"cfb2h":"(.*?)"/);
+  const bl = blMatch ? blMatch[1] : '';
+
+  // Step 2: Build the request payload
+  const prompt = systemPrompt + '\n\n' + userMessage;
+  const innerPayload = JSON.stringify([
+    [prompt, 0, null, [], null, null, 0],
+    null,             // language
+    [null, null, null], // conversation metadata (null = new chat)
+    null, null, null,
+    [1]               // web access
+  ]);
+  const fReq = JSON.stringify([null, innerPayload]);
+
+  // Step 3: POST to StreamGenerate
+  const params = new URLSearchParams({
+    _reqid: String(Math.floor(Math.random() * 900000) + 100000),
+    rt: 'c',
+    bl: bl
+  });
+
+  const res = await fetch(
+    `https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?${params}`, {
     method: 'POST',
+    credentials: 'include',
     headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': settings.apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true'
+      'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8',
+      'Origin': 'https://gemini.google.com',
+      'Referer': 'https://gemini.google.com/',
+      'X-Same-Domain': '1'
     },
+    body: `at=${encodeURIComponent(snlm0e)}&f.req=${encodeURIComponent(fReq)}`
+  });
+
+  if (!res.ok) throw new Error(`Gemini ${res.status}: ${await res.text()}`);
+
+  // Step 4: Parse response — line-delimited, main data on line 3
+  const rawText = await res.text();
+  const lines = rawText.split('\n').filter(l => l.trim());
+
+  // Find the line containing the response JSON (usually the longest one)
+  let responseText = '';
+  for (const line of lines) {
+    try {
+      const outer = JSON.parse(line);
+      if (!Array.isArray(outer)) continue;
+      for (const item of outer) {
+        if (!Array.isArray(item) || item.length < 3) continue;
+        try {
+          const inner = JSON.parse(item[2]);
+          // Navigate nested structure to find the text response
+          if (inner && inner[4] && Array.isArray(inner[4])) {
+            for (const candidate of inner[4]) {
+              if (candidate && candidate[1] && Array.isArray(candidate[1]) && candidate[1][0]) {
+                responseText = candidate[1][0];
+                break;
+              }
+            }
+          }
+          // Alternative path: inner[0][0] for simpler responses
+          if (!responseText && inner && inner[0] && typeof inner[0] === 'string') {
+            responseText = inner[0];
+          }
+        } catch { /* not the right item */ }
+      }
+      if (responseText) break;
+    } catch { /* not JSON */ }
+  }
+
+  if (!responseText) throw new Error('No response from Gemini.');
+  return responseText;
+}
+
+/* ── Claude Web Session ── */
+
+async function callClaudeWeb(systemPrompt, userMessage) {
+  // Step 1: Get organization ID
+  const orgRes = await fetch('https://claude.ai/api/organizations', {
+    credentials: 'include'
+  });
+  if (!orgRes.ok) throw new Error('Not logged in to Claude. Open settings and log in.');
+  const orgs = await orgRes.json();
+  if (!orgs.length) throw new Error('No Claude organization found. Please log in again.');
+  const orgId = orgs[0].uuid;
+
+  // Step 2: Create a new conversation
+  const convUuid = crypto.randomUUID();
+  const convRes = await fetch(`https://claude.ai/api/organizations/${orgId}/chat_conversations`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: '', uuid: convUuid })
+  });
+  if (!convRes.ok) throw new Error(`Claude conversation create failed: ${convRes.status}`);
+
+  // Step 3: Send message
+  const msgRes = await fetch(`https://claude.ai/api/organizations/${orgId}/chat_conversations/${convUuid}/completion`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: settings.model,
-      max_tokens: 1024,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userMessage }]
+      prompt: systemPrompt + '\n\n' + userMessage,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
     })
   });
-  if (!res.ok) throw new Error(`Anthropic ${res.status}: ${await res.text()}`);
-  const data = await res.json();
-  return data.content[0].text;
+  if (!msgRes.ok) throw new Error(`Claude ${msgRes.status}: ${await msgRes.text()}`);
+
+  // Step 4: Parse SSE stream
+  const text = await msgRes.text();
+  const lines = text.split('\n').filter(l => l.startsWith('data: '));
+  let result = '';
+  for (const line of lines) {
+    try {
+      const data = JSON.parse(line.slice(6));
+      if (data.completion) result += data.completion;
+    } catch { /* skip */ }
+  }
+  if (!result) throw new Error('No response from Claude.');
+  return result;
 }
 
-async function callOpenAI(settings, systemPrompt, userMessage, json = false) {
-  const body = {
-    model: settings.model,
-    max_tokens: 1024,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userMessage }
-    ]
-  };
-  if (json) body.response_format = { type: 'json_object' };
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${settings.apiKey}`
-    },
-    body: JSON.stringify(body)
+/* ── Login status check (called from options page) ── */
+
+async function checkLoginStatus(provider) {
+  try {
+    if (provider === 'chatgpt-web') {
+      const res = await fetch('https://chatgpt.com/api/auth/session', { credentials: 'include' });
+      if (!res.ok) return { loggedIn: false };
+      const data = await res.json();
+      return { loggedIn: !!data.accessToken, user: data.user?.email || '' };
+    }
+    if (provider === 'claude-web') {
+      const res = await fetch('https://claude.ai/api/organizations', { credentials: 'include' });
+      if (!res.ok) return { loggedIn: false };
+      const orgs = await res.json();
+      return { loggedIn: Array.isArray(orgs) && orgs.length > 0, user: orgs[0]?.name || '' };
+    }
+    if (provider === 'gemini-web') {
+      const res = await fetch('https://gemini.google.com/app', { credentials: 'include', headers: { 'Accept': 'text/html' } });
+      if (!res.ok) return { loggedIn: false };
+      const html = await res.text();
+      const hasToken = /"SNlM0e":"/.test(html);
+      return { loggedIn: hasToken, user: hasToken ? 'Google account' : '' };
+    }
+  } catch { /* network error */ }
+  return { loggedIn: false };
+}
+
+/* ═══════════════════════════════════════════
+   2-PHASE PIPELINE
+   Phase 1: ARIA tree + sitemap + question -> LLM (can_answer or needs_pages)
+   Phase 2: Fetch needed pages -> LLM with full content -> answer
+   ═══════════════════════════════════════════ */
+
+// Score and rank links by keyword relevance to the question
+function scoreLinks(links, sitemapUrls, question, excludeUrls) {
+  const words = question.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+  const boostTerms = ['support', 'help', 'service', 'contact', 'faq', 'return',
+    'repair', 'warranty', 'form', 'klantenservice', 'reparatie', 'retour',
+    'garantie', 'hilfe', 'aide', 'formulaire', 'onderdelen', 'label',
+    'download', 'order', 'account', 'shipping', 'delivery'];
+  const allTerms = [...new Set([...words, ...boostTerms])];
+  const excluded = new Set((excludeUrls || []).map(u => u.split('#')[0]));
+
+  // Combine page links + sitemap into one list, deduped
+  const seen = new Set();
+  const candidates = [];
+
+  for (const link of links) {
+    const url = link.url;
+    const normalized = url.split('#')[0];
+    if (seen.has(normalized) || excluded.has(normalized)) continue;
+    seen.add(normalized);
+    candidates.push({ text: link.text, url });
+  }
+
+  for (const u of (sitemapUrls || [])) {
+    const normalized = u.split('#')[0];
+    if (seen.has(normalized) || excluded.has(normalized)) continue;
+    seen.add(normalized);
+    candidates.push({ text: shortenUrl(u), url: u });
+  }
+
+  // Score each candidate
+  const scored = candidates.map(link => {
+    const textLower = (link.text || '').toLowerCase();
+    const pathLower = shortenUrl(link.url).toLowerCase();
+    const combined = textLower + ' ' + pathLower;
+    let score = 0;
+
+    // Question words matching
+    for (const w of words) {
+      if (textLower.includes(w)) score += 3;
+      if (pathLower.includes(w)) score += 2;
+    }
+
+    // Boost terms matching (URL path only — these are common service paths)
+    for (const t of boostTerms) {
+      if (pathLower.includes(t)) score += 1;
+    }
+
+    // Prefer deeper paths (more specific pages)
+    const depth = (pathLower.match(/\//g) || []).length;
+    if (depth >= 3) score += 1;
+
+    // Penalize generic top-level pages
+    if (pathLower === '/' || pathLower.match(/^\/[a-z]{2}(-[a-z]{2})?\/?$/)) score -= 5;
+
+    // Penalize media files
+    if (/\.(pdf|jpg|png|gif|svg|zip|mp4|css|js)$/i.test(pathLower)) score -= 2;
+
+    return { ...link, score };
   });
-  if (!res.ok) throw new Error(`OpenAI ${res.status}: ${await res.text()}`);
-  const data = await res.json();
-  return data.choices[0].message.content;
+
+  // Sort by score descending, return top results
+  scored.sort((a, b) => b.score - a.score);
+  return scored;
 }
 
-/* ═══════════════════════════════════════════
-   PIPELINE
-   Phase 1: DECOMPOSE  — break question into sub-questions
-   Phase 2: SCAN       — extract headings + links from current page
-   Phase 3: NAVIGATE   — LLM picks pages (repeated per round)
-   Phase 4: EXTRACT    — fetch + extract headings from picked pages
-   Phase 5: ANSWER     — final answer from all gathered context
-   ═══════════════════════════════════════════ */
-
-/* ── Phase 1: DECOMPOSE ── */
-
-async function phaseDecompose(settings, question, history) {
-  const system = `You decompose user questions into sub-questions for searching a website.
-Respond with ONLY valid JSON. No explanation.`;
-
-  let historyCtx = '';
-  if (history && history.length > 0) {
-    historyCtx = `\nThis is a FOLLOW-UP question. Previous conversation:\n` +
-      history.map(h => `Q: ${h.question}\nA: ${h.answer}`).join('\n\n') +
-      `\n\nThe user was not satisfied with the previous answer. Decompose differently — look for NEW angles.\n`;
-  }
-
-  const prompt = `The user asked: "${question}"
-${historyCtx}
-Break this into 1-3 focused sub-questions that would help find the answer on a website.
-Each sub-question should target a specific piece of information.
-Mark dependencies — if sub-question 2 depends on finding something in sub-question 1.
-
-Respond as JSON:
-{
-  "subquestions": [
-    { "id": 1, "question": "...", "keywords": ["...", "..."], "depends_on": [] },
-    { "id": 2, "question": "...", "keywords": ["...", "..."], "depends_on": [1] }
-  ]
-}`;
-
-  return callLLMJson(settings, system, prompt);
-}
-
-/* ── Phase 2: SCAN ── */
-
-function phaseScan(pageData, html) {
-  // From content script we get pageData (DOM-extracted).
-  // If we also have raw HTML, extract headings from it.
-  const headings = html
-    ? extractHeadingsFromHtml(html)
-    : (pageData.headings || []);
-  const links = pageData.links || [];
-
-  return {
-    url: pageData.url,
-    title: pageData.title,
-    headings,
-    links,
-    text: pageData.text || ''
-  };
-}
-
-/* ── Phase 3: NAVIGATE ── */
-
-async function phaseNavigate(settings, subquestions, pages, visitedUrls, sitemapUrls) {
-  const system = `You pick the best pages to visit on a website to answer questions.
-Respond with ONLY valid JSON. No explanation.`;
-
-  // Build a site map from all pages we've seen so far
-  const siteMap = pages.map(p => {
-    const headingList = p.headings.length > 0
-      ? p.headings.map(h => `${'#'.repeat(h.level)} ${h.text}`).join('\n')
-      : '(no headings found)';
-
-    // Split nav links (site structure) from content links
-    const navLinks = p.links.filter(l => l.nav);
-    const contentLinks = p.links.filter(l => !l.nav);
-    const shownLinks = [...navLinks, ...contentLinks.slice(0, 40)];
-    const linkSample = shownLinks.map(l => {
-      let tag = '';
-      if (l.nav) tag = l.navLabel ? ` [NAV: ${l.navLabel}]` : ' [NAV]';
-      return `  - [${l.text}]${tag} → ${shortenUrl(l.url)}`;
-    }).join('\n');
-
-    return `PAGE: ${p.url}\nTitle: ${p.title}\nHeadings:\n${headingList}\nLinks:\n${linkSample}`;
-  }).join('\n\n---\n\n');
-
-  // Include sitemap URLs — pre-filter to keep prompt manageable
-  // A sitemap can have thousands of URLs; we keyword-filter to ~100 max
-  let sitemapSection = '';
-  if (sitemapUrls && sitemapUrls.length > 0) {
-    const keywords = subquestions.flatMap(sq => sq.keywords || []).map(k => k.toLowerCase());
-    // Also add common service/support path segments
-    const boostTerms = ['support', 'help', 'service', 'contact', 'faq', 'return',
-      'repair', 'warranty', 'form', 'klantenservice', 'reparatie', 'retour',
-      'garantie', 'hilfe', 'aide', 'formulaire', 'onderdelen'];
-    const allTerms = [...new Set([...keywords, ...boostTerms])];
-
-    const filtered = sitemapUrls
-      .filter(u => !visitedUrls.has(u))
-      .filter(u => {
-        const path = shortenUrl(u).toLowerCase();
-        return allTerms.some(t => path.includes(t));
-      })
-      .map(u => shortenUrl(u));
-
-    // If keyword filter gives too few, include a broader sample
-    let paths = filtered;
-    if (filtered.length < 10) {
-      const remaining = sitemapUrls
-        .filter(u => !visitedUrls.has(u))
-        .map(u => shortenUrl(u))
-        .filter(p => !filtered.includes(p))
-        .slice(0, 50);
-      paths = [...filtered, ...remaining];
-    }
-    paths = paths.slice(0, 100);
-
-    if (paths.length > 0) {
-      sitemapSection = `\n\nSITEMAP (${sitemapUrls.length} total pages on site, showing ${paths.length} most relevant):\n${paths.join('\n')}`;
-    }
-  }
-
-  const alreadyVisited = [...visitedUrls].map(u => shortenUrl(u)).join(', ');
-  const questionsStr = subquestions.map(sq =>
-    `${sq.id}. ${sq.question} [keywords: ${sq.keywords.join(', ')}]`
-  ).join('\n');
-
-  const prompt = `We are exploring a website to answer these sub-questions:
-${questionsStr}
-
-Here is what we've seen so far (page headings and available links):
-
-${siteMap}${sitemapSection}
-
-Already visited (do NOT pick these): ${alreadyVisited || 'none'}
-
-Pick up to 3 pages to visit next. Choose based on:
-- SITEMAP URLs that match the sub-questions (best source — these are real pages)
-- [NAV] links (site navigation structure)
-- Page headings that match the sub-questions
-- Link text that suggests relevant content (in ANY language)
-- Prefer deeper/specific pages (e.g. /service/repairs) over top-level pages (e.g. /products)
-- If a heading on a visited page already answers a sub-question, note it
-
-Respond as JSON:
-{
-  "picks": [
-    { "url": "full URL", "reason": "why this page likely helps", "for_subquestion": 1 }
-  ],
-  "already_answered": [
-    { "subquestion_id": 1, "answer_hint": "found on page X: ...", "source_url": "..." }
-  ]
-}
-
-If no promising pages remain, return: { "picks": [], "already_answered": [] }`;
-
-  return callLLMJson(settings, system, prompt);
-}
-
-/* ── Phase 4: EXTRACT ── */
-
-async function phaseExtract(urls) {
-  const results = [];
-  for (let i = 0; i < urls.length; i++) {
-    if (i > 0) await delay(DEFAULTS.fetchDelay);
-    const html = await fetchPage(urls[i]);
-    if (!html) {
-      results.push({ url: urls[i], title: '', headings: [], links: [], text: '', ok: false });
-      continue;
-    }
-    results.push({
-      url: urls[i],
-      title: extractTitleFromHtml(html),
-      headings: extractHeadingsFromHtml(html),
-      links: extractLinksFromHtml(html, urls[i]),
-      text: truncateText(extractTextFromHtml(html), 3000),
-      ok: true
-    });
-  }
-  return results;
-}
-
-/* ── Phase 5: ANSWER ── */
-
-async function phaseAnswer(settings, question, subquestions, pages, history) {
-  const system = `You answer questions about a website using ONLY the provided page contents.
-Respond with ONLY valid JSON. No explanation.`;
-
-  const context = pages
-    .filter(p => p.text)
-    .map(p => `PAGE: ${p.url}\nTitle: ${p.title}\n\n${p.text}`)
-    .join('\n\n---\n\n');
-
-  const sqStr = subquestions.map(sq => `${sq.id}. ${sq.question}`).join('\n');
-
-  // Include previous Q&A so follow-ups don't repeat
-  let historySection = '';
-  if (history && history.length > 0) {
-    historySection = `\nPrevious questions and answers in this conversation (do NOT repeat these — build on them):\n` +
-      history.map(h => `Q: ${h.question}\nA: ${h.answer}`).join('\n\n') + '\n';
-  }
-
-  const prompt = `Original question: "${question}"
-${historySection}
-Sub-questions:
-${sqStr}
-
-Content from ${pages.length} pages:
-
-${context}
-
-Answer the original question using ONLY the page contents above. If this is a follow-up, give a NEW answer that builds on previous answers — do not repeat what was already said.
-For each claim, cite the source URL.
-If the content doesn't contain the answer, say so and suggest what the user should look for.
-
-Respond as JSON:
-{
-  "answer": "Your complete answer here, with URLs inline",
-  "sources": [
-    { "url": "...", "title": "...", "relevant_excerpt": "brief quote that was useful" }
-  ],
-  "found": true
-}
-
-Set "found" to false if the pages didn't contain the answer.`;
-
-  return callLLMJson(settings, system, prompt);
-}
-
-/* ═══════════════════════════════════════════
-   ORCHESTRATOR
-   ═══════════════════════════════════════════ */
-
-// Per-tab conversation history
-const tabHistory = {};
-
-async function handleQuestion(question, pageData, tabId) {
+async function handleQuestion(question, pageData, senderTabId) {
   const settings = await getSettings();
 
-  if (!settings.apiKey) {
-    sendToTab(tabId, { type: 'nokey' });
-    return;
-  }
-
-  // Get or create history for this tab
-  if (!tabHistory[tabId]) tabHistory[tabId] = [];
-  const history = tabHistory[tabId];
-
-  const visitedUrls = new Set([pageData.url]);
-  const allPages = []; // pages with headings/links/text
+  const origin = new URL(pageData.url).origin;
+  const history = pageData.history || [];
 
   try {
-    // ── Phase 1: DECOMPOSE ──
-    sendToTab(tabId, { type: 'progress', phase: 'decompose', detail: 'Breaking down question...' });
-    const decomp = await phaseDecompose(settings, question, history);
-    const subquestions = decomp.subquestions || [{ id: 1, question, keywords: question.split(/\s+/), depends_on: [] }];
+    // ── Fetch sitemap ──
+    sendToSidePanel({ type: 'progress', phase: 'Analyzing page...', detail: 'Fetching sitemap...' });
 
-    sendToTab(tabId, {
-      type: 'progress', phase: 'decompose',
-      detail: subquestions.map(sq => sq.question).join(' → ')
-    });
+    const sitemapUrls = await fetchSitemap(origin, new URL(pageData.url).pathname);
+    const sitemapPaths = (sitemapUrls || [])
+      .filter(u => u !== pageData.url)
+      .map(u => ({ text: shortenUrl(u), url: u }));
 
-    // ── Phase 2: SCAN current page + fetch sitemap ──
-    sendToTab(tabId, { type: 'progress', phase: 'scan', detail: 'Scanning page + fetching sitemap...' });
+    // ── Build clean link list from ARIA tree + sitemap ──
+    const pageLinks = (pageData.links || []).map(l => ({
+      text: l.text,
+      url: l.url.startsWith('/') ? origin + l.url : l.url
+    }));
 
-    const origin = new URL(pageData.url).origin;
-    const [currentPage, sitemapUrls] = await Promise.all([
-      Promise.resolve(phaseScan(pageData, null)),
-      fetchSitemap(origin, new URL(pageData.url).pathname)
-    ]);
-    allPages.push(currentPage);
+    const seen = new Set([pageData.url.split('#')[0]]);
+    const triedUrls = history.flatMap(h => h.tried_urls || []);
+    for (const u of triedUrls) seen.add(u.split('#')[0]);
 
-    const scanDetail = sitemapUrls.length > 0
-      ? `Sitemap: ${sitemapUrls.length} pages | Current page: ${currentPage.headings.length} headings, ${currentPage.links.length} links`
-      : `No sitemap found | Current page: ${currentPage.headings.length} headings, ${currentPage.links.length} links`;
-    sendToTab(tabId, { type: 'progress', phase: 'scan', detail: scanDetail });
-
-    // ── Rounds: NAVIGATE → EXTRACT → (repeat) ──
-    for (let round = 1; round <= DEFAULTS.maxRounds; round++) {
-      sendToTab(tabId, {
-        type: 'progress', phase: 'navigate',
-        detail: `Round ${round}/${DEFAULTS.maxRounds} — picking pages...`,
-        round
-      });
-
-      // Phase 3: NAVIGATE (with sitemap)
-      const nav = await phaseNavigate(settings, subquestions, allPages, visitedUrls, sitemapUrls);
-
-      // Check if some answers were found in headings already
-      if (nav.already_answered && nav.already_answered.length > 0) {
-        sendToTab(tabId, {
-          type: 'progress', phase: 'navigate',
-          detail: `Found hints: ${nav.already_answered.map(a => a.answer_hint).join('; ')}`,
-          round
-        });
-      }
-
-      const picks = (nav.picks || []).filter(p => {
-        try { return !visitedUrls.has(new URL(p.url, pageData.url).href); }
-        catch { return false; }
-      }).slice(0, settings.maxPages);
-
-      if (picks.length === 0) {
-        sendToTab(tabId, {
-          type: 'progress', phase: 'navigate',
-          detail: `Round ${round} — no more promising pages`,
-          round
-        });
-        break;
-      }
-
-      // Phase 4: EXTRACT
-      const urls = picks.map(p => {
-        try { return new URL(p.url, pageData.url).href; }
-        catch { return p.url; }
-      });
-
-      for (const u of urls) visitedUrls.add(u);
-
-      sendToTab(tabId, {
-        type: 'progress', phase: 'extract',
-        detail: picks.map(p => `${shortenUrl(p.url)} (${p.reason})`).join(' | '),
-        round
-      });
-
-      const extracted = await phaseExtract(urls);
-      const extractReport = extracted.map(p => {
-        if (!p.ok) return `${shortenUrl(p.url)}: FAILED`;
-        return `${shortenUrl(p.url)}: ${p.text.length} chars, ${p.headings.length} headings, ${p.links.length} links`;
-      }).join(' | ');
-      sendToTab(tabId, {
-        type: 'progress', phase: 'extract',
-        detail: extractReport,
-        round
-      });
-
-      for (const page of extracted) {
-        if (page.ok) allPages.push(page);
-      }
+    const allLinks = [];
+    for (const link of [...pageLinks, ...sitemapPaths]) {
+      const normalized = link.url.split('#')[0];
+      if (seen.has(normalized)) continue;
+      seen.add(normalized);
+      allLinks.push(link);
     }
 
-    // ── Phase 5: ANSWER ──
-    sendToTab(tabId, { type: 'progress', phase: 'answer', detail: 'Assembling answer...' });
-    const result = await phaseAnswer(settings, question, subquestions, allPages, history);
+    if (allLinks.length === 0) {
+      sendToSidePanel({
+        type: 'answer',
+        text: 'No links found on this page or sitemap to explore.',
+        question,
+        sources: []
+      });
+      return;
+    }
 
-    // Save to history for follow-up questions
-    history.push({ question, answer: result.answer });
-    // Keep last 5 exchanges to avoid token bloat
-    if (history.length > 5) history.shift();
+    // ── Single LLM call: pick line numbers from link list ──
+    sendToSidePanel({ type: 'progress', phase: 'Finding relevant pages...', detail: `${allLinks.length} links found` });
 
-    sendToTab(tabId, {
+    const numberedLinks = allLinks.slice(0, 150);
+    const linkList = numberedLinks.map((l, i) => `${i + 1}. [${l.text}] -> ${shortenUrl(l.url)}`).join('\n');
+
+    let historySection = '';
+    if (history.length > 0) {
+      historySection = `\nPrevious answers were WRONG. Pick DIFFERENT links.\n` +
+        (triedUrls.length > 0 ? `Already tried: ${triedUrls.map(u => shortenUrl(u)).join(', ')}\n` : '');
+    }
+
+    const systemPrompt = `Pick the 5 best links to answer a question. Return ONLY line numbers as JSON.`;
+
+    const userPrompt = `${linkList}
+${historySection}
+Question: ${question}
+
+Return exactly 5 picks. For each, give the line number and a short English label.
+Think about what each page CONTAINS, not just the link text.
+Example: {"picks":[{"n":3,"label":"Deliveries & returns"},{"n":17,"label":"FAQ"}],"reason":"brief explanation"}`;
+
+    const result = await callLLMJson(settings, systemPrompt, userPrompt);
+
+    // Map line numbers back to actual links
+    const picks = (result.picks || []).slice(0, 5);
+    const sources = picks
+      .filter(p => p.n >= 1 && p.n <= numberedLinks.length)
+      .map(p => {
+        const link = numberedLinks[p.n - 1];
+        return { url: link.url, title: p.label || link.text, relevant_excerpt: link.text };
+      });
+
+    if (sources.length === 0) {
+      sendToSidePanel({
+        type: 'answer',
+        text: 'Could not identify relevant pages. Try asking differently.',
+        question,
+        sources: []
+      });
+      return;
+    }
+
+    sendToSidePanel({
       type: 'answer',
-      text: result.answer,
-      found: result.found,
-      sources: result.sources || [],
-      pagesVisited: allPages.length,
-      trail: allPages.map(p => `${shortenUrl(p.url)} — ${p.title}`)
+      text: result.reason || 'Here are the most relevant pages:',
+      question,
+      sources
     });
 
   } catch (err) {
-    sendToTab(tabId, { type: 'error', message: err.message || 'Pipeline failed.' });
+    sendToSidePanel({ type: 'error', message: err.message || 'Pipeline failed.' });
   }
 }
 
@@ -635,17 +643,114 @@ function shortenUrl(url) {
   catch { return url; }
 }
 
+/** Send a message to the side panel (which is an extension page, not a tab) */
+function sendToSidePanel(message) {
+  api.runtime.sendMessage(message).catch(() => {});
+}
+
+/** Legacy: send to a specific tab (still used for content script communication) */
 function sendToTab(tabId, message) {
   api.tabs.sendMessage(tabId, message).catch(() => {});
 }
 
+/* ── Site Search: fetch results page, extract links, LLM picks top 5 ── */
+
+function extractLinksFromHtml(html, origin) {
+  const links = [];
+  const re = /<a\s[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const href = m[1];
+    const text = m[2].replace(/<[^>]+>/g, '').trim();
+    if (!text || text.length < 3) continue;
+    try {
+      const url = new URL(href, origin);
+      if (url.origin === origin && !url.pathname.match(/\.(css|js|png|jpg|svg|gif|ico)$/i)) {
+        links.push({ text: text.slice(0, 150), url: url.pathname + url.search });
+      }
+    } catch { /* skip bad urls */ }
+  }
+  // Dedupe by URL
+  const seen = new Set();
+  return links.filter(l => {
+    if (seen.has(l.url)) return false;
+    seen.add(l.url);
+    return true;
+  });
+}
+
+async function handleSiteSearch(query, searchUrl, pageUrl) {
+  const settings = await getSettings();
+  const origin = new URL(pageUrl).origin;
+
+  try {
+    sendToSidePanel({ type: 'progress', phase: 'Searching site...', detail: shortenUrl(searchUrl) });
+
+    const html = await fetchPage(searchUrl);
+    if (!html) {
+      sendToSidePanel({ type: 'error', message: 'Could not fetch search results from this site.' });
+      return;
+    }
+
+    // Extract links from search results page
+    const links = extractLinksFromHtml(html, origin);
+    if (links.length === 0) {
+      sendToSidePanel({ type: 'error', message: 'No results found on the search page.' });
+      return;
+    }
+
+    sendToSidePanel({ type: 'progress', phase: 'Picking best results...', detail: `${links.length} links found` });
+
+    // Same format as main search: numbered link list -> LLM picks top 5
+    const numberedLinks = links.slice(0, 100);
+    const linkList = numberedLinks.map((l, i) => `${i + 1}. [${l.text}] -> ${l.url}`).join('\n');
+
+    const systemPrompt = `Pick the 5 best links to answer a question. Return ONLY line numbers as JSON.`;
+    const userPrompt = `Site search results for "${query}":\n${linkList}\n\nQuestion: ${query}\n\nReturn exactly 5 picks. For each, give the line number and a short English label.\nExample: {"picks":[{"n":3,"label":"Form 1065 instructions"},{"n":7,"label":"Filing guide"}],"reason":"brief explanation"}`;
+
+    const result = await callLLMJson(settings, systemPrompt, userPrompt);
+
+    const picks = (result.picks || []).slice(0, 5);
+    const sources = picks
+      .filter(p => p.n >= 1 && p.n <= numberedLinks.length)
+      .map(p => {
+        const link = numberedLinks[p.n - 1];
+        return { url: origin + link.url, title: p.label || link.text, relevant_excerpt: link.text };
+      });
+
+    sendToSidePanel({
+      type: 'answer',
+      text: result.reason || 'Here are the most relevant results from site search:',
+      question: 'Site search: ' + query,
+      sources: sources.length > 0 ? sources : [{ url: searchUrl, title: 'Search results' }]
+    });
+
+  } catch (err) {
+    sendToSidePanel({ type: 'error', message: err.message || 'Site search failed.' });
+  }
+}
+
 /* ── Message listener ── */
 
-api.runtime.onMessage.addListener((msg, sender) => {
-  if (msg.type === 'ask' && sender.tab) {
-    handleQuestion(msg.question, msg.pageData, sender.tab.id);
+api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === 'ask') {
+    // Message from side panel with page data
+    handleQuestion(msg.question, msg.pageData, sender.tab?.id);
+  } else if (msg.type === 'asksite') {
+    // Resolve search URL template
+    let searchUrl = msg.searchUrl;
+    if (searchUrl && searchUrl.includes('__QUERY__')) {
+      searchUrl = searchUrl.replace('__QUERY__', encodeURIComponent(msg.query));
+    }
+    handleSiteSearch(msg.query, searchUrl, msg.pageUrl);
   } else if (msg.type === 'openSettings') {
     api.runtime.openOptionsPage();
+  } else if (msg.type === 'checkLogin') {
+    checkLoginStatus(msg.provider).then(sendResponse);
+    return true; // async response
+  } else if (msg.type === 'webProviderResult') {
+    const cb = _webProviderCallbacks.get(msg.callId);
+    if (cb) cb({ text: msg.text, error: msg.error });
   }
   return false;
 });
