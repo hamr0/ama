@@ -466,6 +466,18 @@
     input.value = '';
     lastQuestion = question;
 
+    // Log query submission event (privacy-preserving)
+    if (window.AMAAnalytics) {
+      const tab = await getActiveTab();
+      const url = tab?.url || '';
+      window.AMAAnalytics.logQuerySubmitted(
+        mode,
+        providerSelect.value,
+        question.length,
+        url
+      );
+    }
+
     storeAndAppendMsg('user', question);
     showProgress('Working...', '');
 
