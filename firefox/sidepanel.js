@@ -24,6 +24,7 @@
   let activeMode = null;
   let lastQuestion = '';
   let currentOrigin = '';
+  let currentQueryId = null; // Analytics: tracks current query session
 
   // Per-site conversation storage: origin → { messages: [{role, html}], history: [] }
   const siteData = new Map();
@@ -472,31 +473,70 @@
     storeAndAppendMsg('user', question);
     showProgress('Working...', '');
 
+    // Analytics: Generate query ID and emit query_submitted event
+    if (window.AMAAnalytics) {
+      currentQueryId = window.AMAAnalytics.generateQueryId();
+      const effectiveMode = mode || 'research';
+      window.AMAAnalytics.hashDomain(currentOrigin).then(domainHash => {
+        window.AMAAnalytics.emitAnalyticsEvent('query_submitted', {
+          mode: effectiveMode,
+          provider: providerSelect.value || 'chatgpt',
+          query_length: question.length,
+          site_domain_hash: domainHash,
+          timestamp: Date.now()
+        });
+      });
+    }
+
     try {
       const pageData = await getPageData();
+
+      // Analytics: Emit initiated funnel stage
+      if (window.AMAAnalytics && currentQueryId) {
+        window.AMAAnalytics.emitAnalyticsEvent('funnel_stage', {
+          query_id: currentQueryId,
+          stage: 'initiated',
+          latency_ms: 0,
+          timestamp: Date.now()
+        });
+      }
 
       if (mode === 'summarize' || mode === 'contact') {
         // Direct LLM call with current page content — no link picking
         showProgress(mode === 'summarize' ? 'Summarizing...' : 'Finding contacts...', '');
-        api.runtime.sendMessage({ type: 'direct', question, pageData });
+        api.runtime.sendMessage({ type: 'direct', question, pageData, queryId: currentQueryId });
       } else if (mode === 'search') {
         showProgress('Finding relevant pages...', '');
-        api.runtime.sendMessage({ type: 'ask', question, pageData });
+        api.runtime.sendMessage({ type: 'ask', question, pageData, queryId: currentQueryId });
       } else if (mode === 'asksite') {
         showProgress('Searching site...', question);
         api.runtime.sendMessage({
           type: 'asksite',
           query: question,
           searchUrl: pageData._searchUrl || '',
-          pageUrl: pageData.url
+          pageUrl: pageData.url,
+          queryId: currentQueryId
         });
       } else {
         showProgress('Researching...', 'Finding relevant pages');
-        api.runtime.sendMessage({ type: 'research', question, pageData });
+        api.runtime.sendMessage({ type: 'research', question, pageData, queryId: currentQueryId });
       }
     } catch (err) {
       clearProgress();
       appendError(err.message);
+
+      // Analytics: Emit query_error event
+      if (window.AMAAnalytics && currentQueryId) {
+        window.AMAAnalytics.emitAnalyticsEvent('query_error', {
+          query_id: currentQueryId,
+          stage: 'initiated',
+          error_category: window.AMAAnalytics.categorizeError(err),
+          provider: providerSelect.value || 'chatgpt',
+          mode: mode || 'research',
+          timestamp: Date.now()
+        });
+      }
+
       isBusy = false;
       sendBtn.disabled = false;
     }
@@ -510,6 +550,16 @@
     } else if (msg.type === 'answer') {
       clearProgress();
       appendAnswer(msg.text, msg.sources);
+
+      // Analytics: Emit answer_rendered funnel stage
+      if (window.AMAAnalytics && currentQueryId) {
+        window.AMAAnalytics.emitAnalyticsEvent('funnel_stage', {
+          query_id: currentQueryId,
+          stage: 'answer_rendered',
+          timestamp: Date.now()
+        });
+      }
+
       // Track conversation history for this site
       if (currentOrigin) {
         const site = getSite(currentOrigin);
@@ -519,11 +569,26 @@
       }
       isBusy = false;
       sendBtn.disabled = false;
+      currentQueryId = null; // Reset query ID
     } else if (msg.type === 'error') {
       clearProgress();
       appendError(msg.message);
+
+      // Analytics: Emit query_error event
+      if (window.AMAAnalytics && currentQueryId) {
+        window.AMAAnalytics.emitAnalyticsEvent('query_error', {
+          query_id: currentQueryId,
+          stage: msg.stage || 'unknown',
+          error_category: window.AMAAnalytics.categorizeError(msg.message),
+          provider: providerSelect.value || 'chatgpt',
+          mode: msg.mode || 'unknown',
+          timestamp: Date.now()
+        });
+      }
+
       isBusy = false;
       sendBtn.disabled = false;
+      currentQueryId = null; // Reset query ID
     }
   });
 
