@@ -1,0 +1,11 @@
+{
+  "name": "ama",
+  "version": "0.3.1",
+  "private": true,
+  "description": "Ask Me Anything. Talk to any website. Browser extension that searches across the whole site with your existing AI subscription.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hamr0/ama.git"
+  },
+  "license": "Apache-2.0"
+}

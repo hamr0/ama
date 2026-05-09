@@ -1,5 +1,10 @@
 # AMA
 
+<p align="center">
+  <img src="https://img.shields.io/github/package-json/v/hamr0/ama?label=version&color=2a4f8c" alt="version (auto from package.json)">
+  <img src="https://img.shields.io/badge/license-Apache%202.0-2a4f8c" alt="license: Apache 2.0">
+</p>
+
 **Ask Me Anything. Talk to any website. Not just the page — the whole site with your existing AI subscription.**
 
 ## The problem
