@@ -24,6 +24,7 @@
   let activeMode = null;
   let lastQuestion = '';
   let currentOrigin = '';
+  let requestOrigin = '';   // origin that owns the in-flight request
 
   // Per-site conversation storage: origin → { messages: [{role, html}], history: [] }
   const siteData = new Map();
@@ -126,12 +127,22 @@
     const origin = getOrigin(tab.url);
     if (!origin || origin === currentOrigin) return;
 
-    // Save scroll position? Not needed — we rebuild from stored messages
+    clearProgress();
+
     currentOrigin = origin;
     siteName.textContent = getHostname(tab.url);
 
     // Rebuild messages area from stored conversation
     renderConversation(origin);
+
+    if (requestOrigin && requestOrigin === origin) {
+      isBusy = true;
+      sendBtn.disabled = true;
+      showProgress('Working...', '');
+    } else if (requestOrigin) {
+      isBusy = false;
+      sendBtn.disabled = false;
+    }
 
     // Check site search capability
     refreshPageInfo(tab);
@@ -404,6 +415,7 @@
     removeTabPicker();
     isBusy = true;
     sendBtn.disabled = true;
+    requestOrigin = currentOrigin;
 
     const tabNames = allTabsInfo.map(t => t?.title || 'Untitled').join(' vs ');
     storeAndAppendMsg('user', 'Compare: ' + tabNames);
@@ -465,6 +477,7 @@
     sendBtn.disabled = true;
     input.value = '';
     lastQuestion = question;
+    requestOrigin = currentOrigin;
 
     storeAndAppendMsg('user', question);
     showProgress('Working...', '');
@@ -502,27 +515,69 @@
   /* ── Incoming messages from background ── */
 
   api.runtime.onMessage.addListener((msg) => {
+    const targetOrigin = requestOrigin || currentOrigin;
+    const onScreen = targetOrigin === currentOrigin;
+
     if (msg.type === 'progress') {
-      showProgress(msg.phase, msg.detail);
+      if (onScreen) showProgress(msg.phase, msg.detail);
     } else if (msg.type === 'answer') {
-      clearProgress();
-      appendAnswer(msg.text, msg.sources);
-      // Track conversation history for this site
-      if (currentOrigin) {
-        const site = getSite(currentOrigin);
+      if (onScreen) clearProgress();
+      if (targetOrigin) {
+        const site = getSite(targetOrigin);
         const triedUrls = (msg.sources || []).map(s => s.url).filter(Boolean);
         site.history.push({ question: msg.question, answer: msg.text, tried_urls: triedUrls });
         if (site.history.length > 5) site.history.shift();
       }
+      if (onScreen) {
+        appendAnswer(msg.text, msg.sources);
+      } else {
+        storeAnswerForOrigin(targetOrigin, msg.text, msg.sources);
+      }
+      requestOrigin = '';
       isBusy = false;
       sendBtn.disabled = false;
     } else if (msg.type === 'error') {
-      clearProgress();
-      appendError(msg.message);
+      if (onScreen) {
+        clearProgress();
+        appendError(msg.message);
+      } else {
+        storeErrorForOrigin(targetOrigin, msg.message);
+      }
+      requestOrigin = '';
       isBusy = false;
       sendBtn.disabled = false;
     }
   });
+
+  /* ── Off-screen storage helpers ── */
+
+  function storeAnswerForOrigin(origin, text, sources) {
+    const div = document.createElement('div');
+    div.className = 'waa-msg waa-msg-assistant';
+    let html = `<div class="waa-msg-content">${formatAnswer(text)}`;
+    if (sources && sources.length) {
+      html += `<div class="waa-sources">
+        <div class="waa-sources-title">Sources:</div>
+        ${sources.map(s => {
+          const label = escHtml(s.title || shortenUrl(s.url));
+          const excerpt = s.relevant_excerpt
+            ? `<span class="waa-source-excerpt">${escHtml(s.relevant_excerpt)}</span>`
+            : '';
+          return `<a class="waa-source-link" href="${escAttr(s.url)}" target="_blank" rel="noopener">${label}</a>${excerpt}`;
+        }).join('')}
+      </div>`;
+    }
+    html += `</div><button class="waa-retry">Not right? Try again</button>`;
+    div.innerHTML = html;
+    storeMsg(origin, div);
+  }
+
+  function storeErrorForOrigin(origin, text) {
+    const div = document.createElement('div');
+    div.className = 'waa-error';
+    div.textContent = text;
+    storeMsg(origin, div);
+  }
 
   /* ── UI helpers ── */
 

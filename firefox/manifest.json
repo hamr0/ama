@@ -1,11 +1,12 @@
 {
   "manifest_version": 2,
-  "name": "AMA",
-  "version": "0.3.0",
+  "name": "ama",
+  "version": "1.0.0",
   "description": "Talk to any website. Not just the page — the whole site.",
   "icons": {
     "16": "icon16.png",
     "48": "icon48.png",
+    "96": "icon96.png",
     "128": "icon128.png"
   },
   "permissions": [
@@ -23,7 +24,7 @@
     "js": ["content.js"]
   }],
   "sidebar_action": {
-    "default_title": "AMA",
+    "default_title": "ama",
     "default_panel": "sidepanel.html",
     "default_icon": {
       "16": "icon16.png",
@@ -32,7 +33,7 @@
     "open_at_install": true
   },
   "browser_action": {
-    "default_title": "Toggle AMA sidebar",
+    "default_title": "toggle ama sidebar",
     "default_icon": {
       "16": "icon16.png",
       "48": "icon48.png"
@@ -45,7 +46,7 @@
   "browser_specific_settings": {
     "gecko": {
       "id": "ama@extension",
-      "strict_min_version": "109.0",
+      "strict_min_version": "142.0",
       "data_collection_permissions": {
         "required": ["none"],
         "optional": ["technicalAndInteraction"]

@@ -24,8 +24,9 @@
   let activeMode = null;
   let lastQuestion = '';
   let currentOrigin = '';
+  let requestOrigin = '';   // origin that owns the in-flight request
 
-  // Per-site conversation storage: origin → { messages: [{role, html}], history: [] }
+  // Per-site conversation storage: origin → { messages: [{node, html}], history: [] }
   const siteData = new Map();
 
   function getSite(origin) {
@@ -33,6 +34,38 @@
       siteData.set(origin, { messages: [], history: [] });
     }
     return siteData.get(origin);
+  }
+
+  /* ── Session persistence ── */
+
+  function persistSiteData() {
+    const obj = {};
+    for (const [origin, site] of siteData) {
+      if (site.messages.length === 0 && site.history.length === 0) continue;
+      obj[origin] = {
+        messages: site.messages.map(m => m.html),
+        history: site.history
+      };
+    }
+    api.storage.local.set({ _conversations: obj });
+  }
+
+  async function loadSiteData() {
+    const data = await api.storage.local.get('_conversations');
+    const obj = data._conversations;
+    if (!obj || typeof obj !== 'object') return;
+    const parser = new DOMParser();
+    for (const [origin, site] of Object.entries(obj)) {
+      const msgs = (site.messages || []).map(html => {
+        const doc = parser.parseFromString(html, 'text/html');
+        const node = doc.body.firstElementChild;
+        return node ? { node: document.adoptNode(node), html } : null;
+      }).filter(Boolean);
+      siteData.set(origin, {
+        messages: msgs,
+        history: site.history || []
+      });
+    }
   }
 
   const MODE_CONFIG = {
@@ -126,12 +159,25 @@
     const origin = getOrigin(tab.url);
     if (!origin || origin === currentOrigin) return;
 
-    // Save scroll position? Not needed — we rebuild from stored messages
+    clearProgress();            // always clean up progress DOM node
+
     currentOrigin = origin;
     siteName.textContent = getHostname(tab.url);
 
     // Rebuild messages area from stored conversation
     renderConversation(origin);
+
+    // If we're switching to the origin that owns the in-flight request,
+    // restore the progress indicator; otherwise allow interaction.
+    if (requestOrigin && requestOrigin === origin) {
+      isBusy = true;
+      sendBtn.disabled = true;
+      showProgress('Working...', '');
+    } else if (requestOrigin) {
+      // Different origin has a pending request — let this tab be interactive
+      isBusy = false;
+      sendBtn.disabled = false;
+    }
 
     // Check site search capability
     refreshPageInfo(tab);
@@ -164,10 +210,13 @@
     }
   }
 
-  // Store a message element's HTML so we can rebuild on tab switch
+  // Store a message element for tab-switch rebuild + session persistence
   function storeMsg(origin, el) {
     const site = getSite(origin);
-    site.messages.push({ node: el.cloneNode(true) });
+    const clone = el.cloneNode(true);
+    const wrapper = document.createElement('div');
+    wrapper.appendChild(clone.cloneNode(true));
+    site.messages.push({ node: clone, html: wrapper.innerHTML });
   }
 
   function storeAndAppendMsg(role, text) {
@@ -185,7 +234,7 @@
     if (empty) empty.remove();
   }
 
-  switchToActiveTab();
+  loadSiteData().then(() => switchToActiveTab());
   api.tabs.onActivated.addListener(() => switchToActiveTab());
   api.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (changeInfo.status === 'complete') switchToActiveTab();
@@ -407,6 +456,7 @@
     removeTabPicker();
     isBusy = true;
     sendBtn.disabled = true;
+    requestOrigin = currentOrigin;
 
     const tabNames = allTabsInfo.map(t => t?.title || 'Untitled').join(' vs ');
     storeAndAppendMsg('user', 'Compare: ' + tabNames);
@@ -468,6 +518,7 @@
     sendBtn.disabled = true;
     input.value = '';
     lastQuestion = question;
+    requestOrigin = currentOrigin;
 
     storeAndAppendMsg('user', question);
     showProgress('Working...', '');
@@ -505,27 +556,107 @@
   /* ── Incoming messages from background ── */
 
   api.runtime.onMessage.addListener((msg) => {
+    // Determine which origin this result belongs to
+    const targetOrigin = requestOrigin || currentOrigin;
+    const onScreen = targetOrigin === currentOrigin;
+
     if (msg.type === 'progress') {
-      showProgress(msg.phase, msg.detail);
+      if (onScreen) showProgress(msg.phase, msg.detail);
     } else if (msg.type === 'answer') {
-      clearProgress();
-      appendAnswer(msg.text, msg.sources);
-      // Track conversation history for this site
-      if (currentOrigin) {
-        const site = getSite(currentOrigin);
+      if (onScreen) clearProgress();
+      // Always store under the origin that made the request
+      if (targetOrigin) {
+        const site = getSite(targetOrigin);
         const triedUrls = (msg.sources || []).map(s => s.url).filter(Boolean);
         site.history.push({ question: msg.question, answer: msg.text, tried_urls: triedUrls });
         if (site.history.length > 5) site.history.shift();
       }
+      if (onScreen) {
+        appendAnswer(msg.text, msg.sources);
+      } else {
+        storeAnswerForOrigin(targetOrigin, msg.text, msg.sources);
+      }
+      persistSiteData();
+      requestOrigin = '';
       isBusy = false;
       sendBtn.disabled = false;
     } else if (msg.type === 'error') {
-      clearProgress();
-      appendError(msg.message);
+      if (onScreen) {
+        clearProgress();
+        appendError(msg.message);
+      } else {
+        storeErrorForOrigin(targetOrigin, msg.message);
+      }
+      persistSiteData();
+      requestOrigin = '';
       isBusy = false;
       sendBtn.disabled = false;
     }
   });
+
+  /* ── Off-screen storage helpers ── */
+
+  function storeAnswerForOrigin(origin, text, sources) {
+    const div = document.createElement('div');
+    div.className = 'waa-msg waa-msg-assistant';
+    const msgContent = document.createElement('div');
+    msgContent.className = 'waa-msg-content';
+    const lines = text.split('\n');
+    for (const line of lines) {
+      if (msgContent.childNodes.length > 0) msgContent.appendChild(document.createElement('br'));
+      const parts = line.split(/(\*\*.*?\*\*|`.+?`)/g);
+      for (const part of parts) {
+        if (part.startsWith('**') && part.endsWith('**')) {
+          const strong = document.createElement('strong');
+          strong.textContent = part.slice(2, -2);
+          msgContent.appendChild(strong);
+        } else if (part.startsWith('`') && part.endsWith('`')) {
+          const code = document.createElement('code');
+          code.textContent = part.slice(1, -1);
+          msgContent.appendChild(code);
+        } else {
+          msgContent.appendChild(document.createTextNode(part));
+        }
+      }
+    }
+    if (sources && sources.length) {
+      const sourcesDiv = document.createElement('div');
+      sourcesDiv.className = 'waa-sources';
+      const sourcesTitle = document.createElement('div');
+      sourcesTitle.className = 'waa-sources-title';
+      sourcesTitle.textContent = 'Sources:';
+      sourcesDiv.appendChild(sourcesTitle);
+      for (const s of sources) {
+        const a = document.createElement('a');
+        a.className = 'waa-source-link';
+        a.href = s.url;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.textContent = s.title || shortenUrl(s.url);
+        sourcesDiv.appendChild(a);
+        if (s.relevant_excerpt) {
+          const excerpt = document.createElement('span');
+          excerpt.className = 'waa-source-excerpt';
+          excerpt.textContent = s.relevant_excerpt;
+          sourcesDiv.appendChild(excerpt);
+        }
+      }
+      msgContent.appendChild(sourcesDiv);
+    }
+    div.appendChild(msgContent);
+    const retryBtn = document.createElement('button');
+    retryBtn.className = 'waa-retry';
+    retryBtn.textContent = 'Not right? Try again';
+    div.appendChild(retryBtn);
+    storeMsg(origin, div);
+  }
+
+  function storeErrorForOrigin(origin, text) {
+    const div = document.createElement('div');
+    div.className = 'waa-error';
+    div.textContent = text;
+    storeMsg(origin, div);
+  }
 
   /* ── UI helpers ── */
 

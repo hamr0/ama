@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
-  "name": "AMA",
-  "version": "0.2.0",
+  "name": "ama",
+  "version": "1.0.0",
   "description": "Talk to any website. Not just the page — the whole site.",
   "icons": {
     "16": "icon16.png",
     "48": "icon48.png",
+    "96": "icon96.png",
     "128": "icon128.png"
   },
   "permissions": ["storage", "activeTab", "scripting", "sidePanel"],
@@ -18,7 +19,7 @@
     "js": ["content.js"]
   }],
   "action": {
-    "default_title": "AMA",
+    "default_title": "ama",
     "default_icon": {
       "16": "icon16.png",
       "48": "icon48.png"

@@ -150,12 +150,20 @@ function delay(ms) {
 
 async function callLLMJson(settings, systemPrompt, userMessage) {
   const raw = await callLLMRaw(settings, systemPrompt, userMessage);
+  if (!raw || !raw.trim()) {
+    throw new Error(`${settings.provider} returned an empty response. The session may have expired — try logging in again.`);
+  }
   // Strip markdown fences
   let cleaned = raw.replace(/```json\s*/gi, '').replace(/```/g, '').trim();
   // If response has prose around the JSON, extract the JSON object
   const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
   if (jsonMatch) cleaned = jsonMatch[0];
-  return JSON.parse(cleaned);
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const preview = cleaned.slice(0, 160).replace(/\s+/g, ' ');
+    throw new Error(`${settings.provider} returned non-JSON output: "${preview}${cleaned.length > 160 ? '…' : ''}". The provider may be rate-limited, the session may have expired, or the model ignored the JSON format instruction.`);
+  }
 }
 
 async function callLLMRaw(settings, systemPrompt, userMessage) {
@@ -167,6 +175,16 @@ async function callLLMRaw(settings, systemPrompt, userMessage) {
 
 /* ── ChatGPT Web Session (direct HTTP) ── */
 
+// OpenAI's anti-bot flags fresh device-ids on every request. Keep one stable
+// per install — generated once, persisted, reused.
+async function getStableDeviceId() {
+  const { _oaiDeviceId } = await api.storage.local.get(['_oaiDeviceId']);
+  if (_oaiDeviceId) return _oaiDeviceId;
+  const fresh = crypto.randomUUID();
+  await api.storage.local.set({ _oaiDeviceId: fresh });
+  return fresh;
+}
+
 async function callChatGPTWeb(systemPrompt, userMessage) {
   // Get access token from session
   const sessionRes = await fetch('https://chatgpt.com/api/auth/session', { credentials: 'include' });
@@ -175,7 +193,7 @@ async function callChatGPTWeb(systemPrompt, userMessage) {
   const token = session.accessToken;
   if (!token) throw new Error('ChatGPT session expired. Please log in again.');
 
-  const deviceId = crypto.randomUUID();
+  const deviceId = await getStableDeviceId();
 
   // Get sentinel token
   let sentinelToken = '';
@@ -284,6 +302,17 @@ async function callGeminiWeb(systemPrompt, userMessage) {
   console.log('Gemini raw response length:', rawText.length, 'first 500:', rawText.slice(0, 500));
   const lines = rawText.split('\n').filter(l => l.trim());
 
+  // Diagnostic helper — surface the full raw response when the parsed answer
+  // looks truncated or empty (likely throttled / safety-filtered / blocked).
+  function dumpAndThrowStub(answer) {
+    console.warn('[gemini] suspicious response. Full raw:', rawText);
+    throw new Error(
+      `Gemini returned a stub answer (${JSON.stringify(answer)}) — likely throttled, safety-filtered, or blocked. ` +
+      `Open gemini.google.com in a tab and try the same prompt: if it works there, the extension is being filtered; ` +
+      `if it also returns one line, it's your Google account / IP. Try logging out + back in, or switch providers.`
+    );
+  }
+
   // Find the line containing the response JSON
   let responseText = '';
   for (const line of lines) {
@@ -313,7 +342,14 @@ async function callGeminiWeb(systemPrompt, userMessage) {
     } catch { /* not JSON */ }
   }
 
-  if (!responseText) throw new Error('No response from Gemini.');
+  if (!responseText) dumpAndThrowStub('');
+
+  // Heuristic: a real answer either has terminal punctuation or is reasonably long.
+  // Short fragments without `. ! ? …` are almost always truncation.
+  const trimmed = responseText.trim();
+  const looksTruncated = trimmed.length < 30 && !/[.!?…)\]}'"]\s*$/.test(trimmed);
+  if (looksTruncated) dumpAndThrowStub(trimmed);
+
   return responseText;
 }
 
